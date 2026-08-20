@@ -1,0 +1,32 @@
+name: liquid_glass_container
+description: >-
+  Liquid glass container widget with real refraction, dispersion, fresnel,
+  glare, backdrop blur and shadow. Fast single-pass shader, all platforms
+  including web.
+version: 0.1.0
+repository: https://github.com/mertcanbs/liquid_glass_container
+issue_tracker: https://github.com/mertcanbs/liquid_glass_container/issues
+topics:
+  - liquid-glass
+  - glassmorphism
+  - shader
+  - ui
+  - widget
+
+environment:
+  sdk: ^3.12.0
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  shaders:
+    - lib/shaders/glass_main.frag
+    - lib/shaders/glass_overlay.frag
