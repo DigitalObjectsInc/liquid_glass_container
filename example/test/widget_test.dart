@@ -28,6 +28,6 @@ void main() {
     );
     expect(scope.hasBackdrop, isTrue);
     expect(scope.generation, greaterThan(0));
-    expect(find.text('liquid glass'), findsOneWidget);
+    expect(find.text('Liquid Glass'), findsOneWidget);
   });
 }

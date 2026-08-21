@@ -35,15 +35,11 @@ enum DemoBackground {
   final String? asset;
 }
 
-/// Which glass implementation the demo scope runs.
-enum DemoImpl {
-  auto('Auto'),
-  full('Full'),
-  fallback('Fallback');
-
-  const DemoImpl(this.label);
-  final String label;
-}
+String _modeLabel(GlassRenderMode mode) => switch (mode) {
+  GlassRenderMode.auto => 'Auto',
+  GlassRenderMode.capture => 'Full',
+  GlassRenderMode.backdropFilter => 'Fallback',
+};
 
 class DemoPage extends StatefulWidget {
   const DemoPage({super.key});
@@ -65,7 +61,7 @@ class _DemoPageState extends State<DemoPage>
   final _GlassParams _p = _GlassParams();
   late final Ticker _ticker;
   DemoBackground _bg = DemoBackground.checkerboard;
-  DemoImpl _impl = DemoImpl.auto;
+  GlassRenderMode _mode = GlassRenderMode.auto;
   Size _area = Size.zero;
   Timer? _autoTimer;
   int _autoStep = 0;
@@ -122,10 +118,10 @@ class _DemoPageState extends State<DemoPage>
 
     // measurement harness: ?impl=full|fb, ?bg=anim, ?auto
     final q = Uri.base.queryParameters;
-    _impl = switch (q['impl']) {
-      'full' => DemoImpl.full,
-      'fb' => DemoImpl.fallback,
-      _ => DemoImpl.auto,
+    _mode = switch (q['impl']) {
+      'full' => GlassRenderMode.capture,
+      'fb' => GlassRenderMode.backdropFilter,
+      _ => GlassRenderMode.auto,
     };
     if (q['bg'] == 'anim') _bg = DemoBackground.animated;
     if (q.containsKey('auto')) {
@@ -190,6 +186,32 @@ class _DemoPageState extends State<DemoPage>
     final w = p.width + speed.dx.abs() * p.width * _springSizeFactor / 100;
     final h = p.height + speed.dy.abs() * p.height * _springSizeFactor / 100;
 
+    // Passed at the scope, so the panes below carry no per-pane settings.
+    final settings = LiquidGlassSettings(
+      shape: GlassShape.relative(
+        cornerFactor: p.cornerFactor,
+        roundness: p.roundness,
+      ),
+      thickness: p.thickness,
+      indexOfRefraction: p.indexOfRefraction,
+      dispersion: p.dispersion,
+      fresnelRange: p.fresnelRange,
+      fresnelHardness: p.fresnelHardness,
+      fresnelIntensity: p.fresnelIntensity,
+      glareRange: p.glareRange,
+      glareHardness: p.glareHardness,
+      glareIntensity: p.glareIntensity,
+      glareConvergence: p.glareConvergence,
+      glareOppositeIntensity: p.glareOppositeIntensity,
+      glareAngle: p.glareAngleDeg * math.pi / 180, // panel slider in degrees
+      blurRadius: p.blurRadius,
+      blurEdge: p.blurEdge,
+      tint: p.tintBase.withValues(alpha: p.tintAlpha),
+      shadowBlur: p.shadowBlur,
+      shadowIntensity: p.shadowIntensity,
+      shadowOffset: Offset(p.shadowDx, p.shadowDy),
+    );
+
     return Scaffold(
       body: Stack(
         fit: StackFit.expand,
@@ -209,8 +231,8 @@ class _DemoPageState extends State<DemoPage>
                 onPointerMove: (e) => _retarget(e.localPosition, area),
                 onPointerDown: (e) => _retarget(e.localPosition, area),
                 child: GlassBackdropScope(
-                  fallbackOnCanvasKit: _impl == DemoImpl.auto,
-                  forceFallback: _impl == DemoImpl.fallback,
+                  settings: settings,
+                  renderMode: _mode,
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
@@ -220,13 +242,6 @@ class _DemoPageState extends State<DemoPage>
                         const AnimatedCheckerboard()
                       else
                         CustomPaint(painter: CheckerboardPainter()),
-                      Center(
-                        child: Container(
-                          color: Colors.purple,
-                          width: 100,
-                          height: 100,
-                        ),
-                      ),
                       // center container first so tests can address it as .first
                       for (final dir in const [
                         Offset.zero,
@@ -241,29 +256,9 @@ class _DemoPageState extends State<DemoPage>
                           child: LiquidGlassContainer(
                             width: w,
                             height: h,
-                            cornerRadius: p.cornerRadius,
-                            roundness: p.roundness,
-                            refThickness: p.refThickness,
-                            refFactor: p.refFactor,
-                            refDispersion: p.refDispersion,
-                            refFresnelRange: p.refFresnelRange,
-                            refFresnelHardness: p.refFresnelHardness,
-                            refFresnelFactor: p.refFresnelFactor,
-                            glareRange: p.glareRange,
-                            glareHardness: p.glareHardness,
-                            glareFactor: p.glareFactor,
-                            glareConvergence: p.glareConvergence,
-                            glareOppositeFactor: p.glareOppositeFactor,
-                            glareAngle: p.glareAngle,
-                            blurRadius: p.blurRadius,
-                            blurEdge: p.blurEdge,
-                            tint: p.tintBase.withValues(alpha: p.tintAlpha),
-                            shadowExpand: p.shadowExpand,
-                            shadowFactor: p.shadowFactor,
-                            shadowPosition: Offset(p.shadowDx, p.shadowDy),
                             child: dir == Offset.zero
                                 ? const Text(
-                                    'liquid glass',
+                                    'Liquid Glass',
                                     style: TextStyle(
                                       color: Colors.white,
                                       fontSize: 18,
@@ -403,13 +398,13 @@ class _DemoPageState extends State<DemoPage>
               Wrap(
                 spacing: 4,
                 children: [
-                  for (final impl in DemoImpl.values)
+                  for (final mode in GlassRenderMode.values)
                     ChoiceChip(
-                      label: Text(impl.label),
+                      label: Text(_modeLabel(mode)),
                       labelStyle: _labelStyle,
                       visualDensity: VisualDensity.compact,
-                      selected: _impl == impl,
-                      onSelected: (_) => setState(() => _impl = impl),
+                      selected: _mode == mode,
+                      onSelected: (_) => setState(() => _mode = mode),
                     ),
                 ],
               ),
@@ -418,11 +413,12 @@ class _DemoPageState extends State<DemoPage>
               _slider('Height', p.height, 50, 400, (v) => p.height = v),
               _section('Shape'),
               _slider(
-                'Corner radius',
-                p.cornerRadius,
+                'Corner',
+                p.cornerFactor,
                 0,
-                100,
-                (v) => p.cornerRadius = v,
+                1,
+                (v) => p.cornerFactor = v,
+                digits: 2,
               ),
               _slider(
                 'Roundness',
@@ -433,49 +429,45 @@ class _DemoPageState extends State<DemoPage>
                 digits: 1,
               ),
               _section('Refraction'),
-              _slider(
-                'Thickness',
-                p.refThickness,
-                0,
-                100,
-                (v) => p.refThickness = v,
-              ),
+              _slider('Thickness', p.thickness, 0, 100, (v) => p.thickness = v),
               _slider(
                 'Index',
-                p.refFactor,
+                p.indexOfRefraction,
                 1,
                 2.5,
-                (v) => p.refFactor = v,
+                (v) => p.indexOfRefraction = v,
                 digits: 2,
               ),
               _slider(
                 'Dispersion',
-                p.refDispersion,
+                p.dispersion,
                 0,
                 50,
-                (v) => p.refDispersion = v,
+                (v) => p.dispersion = v,
               ),
               _section('Fresnel'),
               _slider(
                 'Range',
-                p.refFresnelRange,
+                p.fresnelRange,
                 0,
                 100,
-                (v) => p.refFresnelRange = v,
+                (v) => p.fresnelRange = v,
               ),
               _slider(
                 'Hardness',
-                p.refFresnelHardness,
+                p.fresnelHardness,
                 0,
-                100,
-                (v) => p.refFresnelHardness = v,
+                1,
+                (v) => p.fresnelHardness = v,
+                digits: 2,
               ),
               _slider(
-                'Factor',
-                p.refFresnelFactor,
+                'Intensity',
+                p.fresnelIntensity,
                 0,
-                100,
-                (v) => p.refFresnelFactor = v,
+                1,
+                (v) => p.fresnelIntensity = v,
+                digits: 2,
               ),
               _section('Glare'),
               _slider('Range', p.glareRange, 0, 100, (v) => p.glareRange = v),
@@ -483,46 +475,43 @@ class _DemoPageState extends State<DemoPage>
                 'Hardness',
                 p.glareHardness,
                 0,
-                100,
+                1,
                 (v) => p.glareHardness = v,
+                digits: 2,
               ),
               _slider(
-                'Factor',
-                p.glareFactor,
+                'Intensity',
+                p.glareIntensity,
                 0,
-                120,
-                (v) => p.glareFactor = v,
+                1.2,
+                (v) => p.glareIntensity = v,
+                digits: 2,
               ),
               _slider(
                 'Convergence',
                 p.glareConvergence,
                 0,
-                100,
+                1,
                 (v) => p.glareConvergence = v,
+                digits: 2,
               ),
               _slider(
                 'Opposite',
-                p.glareOppositeFactor,
+                p.glareOppositeIntensity,
                 0,
-                100,
-                (v) => p.glareOppositeFactor = v,
+                1,
+                (v) => p.glareOppositeIntensity = v,
+                digits: 2,
               ),
               _slider(
-                'Angle',
-                p.glareAngle,
+                'Angle°',
+                p.glareAngleDeg,
                 -180,
                 180,
-                (v) => p.glareAngle = v,
+                (v) => p.glareAngleDeg = v,
               ),
               _section('Blur'),
-              _slider(
-                'Radius',
-                p.blurRadius.toDouble(),
-                1,
-                200,
-                (v) => p.blurRadius = v.round(),
-                divisions: 199,
-              ),
+              _slider('Radius', p.blurRadius, 0, 100, (v) => p.blurRadius = v),
               _check('Blur edge', p.blurEdge, (v) => p.blurEdge = v),
               _section('Tint'),
               Padding(
@@ -560,19 +549,14 @@ class _DemoPageState extends State<DemoPage>
                 digits: 2,
               ),
               _section('Shadow'),
+              _slider('Blur', p.shadowBlur, 0, 100, (v) => p.shadowBlur = v),
               _slider(
-                'Expand',
-                p.shadowExpand,
+                'Intensity',
+                p.shadowIntensity,
                 0,
-                100,
-                (v) => p.shadowExpand = v,
-              ),
-              _slider(
-                'Factor',
-                p.shadowFactor,
-                0,
-                100,
-                (v) => p.shadowFactor = v,
+                1,
+                (v) => p.shadowIntensity = v,
+                digits: 2,
               ),
               _slider('Offset X', p.shadowDx, -100, 100, (v) => p.shadowDx = v),
               _slider('Offset Y', p.shadowDy, -100, 100, (v) => p.shadowDy = v),
@@ -584,21 +568,23 @@ class _DemoPageState extends State<DemoPage>
   }
 }
 
-/// Demo-tweakable copy of every [LiquidGlassContainer] parameter
-/// (defaults match; tint is split into base color + alpha for the panel).
+/// Demo-tweakable glass parameters in [LiquidGlassSettings]' own units
+/// (defaults match; tint is split into base color + alpha for the panel;
+/// glare angle is kept in degrees for the slider).
 class _GlassParams {
   double width = 200, height = 200;
-  double cornerRadius = 80, roundness = 5;
-  double refThickness = 20, refFactor = 1.4, refDispersion = 7;
-  double refFresnelRange = 30, refFresnelHardness = 20, refFresnelFactor = 20;
-  double glareRange = 30, glareHardness = 20, glareFactor = 90;
-  double glareConvergence = 50, glareOppositeFactor = 80, glareAngle = -45;
-  int blurRadius = 1;
+  double cornerFactor = 0.8, roundness = 5;
+  double thickness = 20, indexOfRefraction = 1.4, dispersion = 7;
+  double fresnelRange = 30, fresnelHardness = 0.2, fresnelIntensity = 0.2;
+  double glareRange = 30, glareHardness = 0.2, glareIntensity = 0.9;
+  double glareConvergence = 0.5, glareOppositeIntensity = 0.8;
+  double glareAngleDeg = -45;
+  double blurRadius = 1;
   bool blurEdge = true;
   Color tintBase = const Color(0xFFFFFFFF);
   double tintAlpha = 0;
-  double shadowExpand = 25, shadowFactor = 15;
-  double shadowDx = 0, shadowDy = -10;
+  double shadowBlur = 25, shadowIntensity = 0.15;
+  double shadowDx = 0, shadowDy = 10;
 }
 
 /// Reference bgType 0: 20 logical-px checkerboard, white / 0.75 grey.

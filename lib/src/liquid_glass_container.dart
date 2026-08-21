@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
+import 'settings.dart';
+
 /// Loads the fragment programs once, shared by all containers.
 class _GlassShaders {
   static late ui.FragmentProgram main;
@@ -22,15 +24,15 @@ class _GlassShaders {
         'packages/liquid_glass_container/lib/shaders/$name',
       ).catchError((_) => ui.FragmentProgram.fromAsset('lib/shaders/$name'));
 
-  static Future<void> ensureLoaded() => _loading ??= Future.wait([
-    _load('glass_main.frag'),
-    _load('glass_overlay.frag'),
-  ]).then((ps) {
-    main = ps[0];
-    overlay = ps[1];
-    loaded = true;
-    _warmUp();
-  });
+  static Future<void> ensureLoaded() => _loading ??=
+      Future.wait([_load('glass_main.frag'), _load('glass_overlay.frag')]).then(
+        (ps) {
+          main = ps[0];
+          overlay = ps[1];
+          loaded = true;
+          _warmUp();
+        },
+      );
 
   /// Draw 1px with each program so the GPU compiles/links them at load time
   /// rather than on the first interaction (WebGL compiles lazily on first use).
@@ -536,10 +538,21 @@ class _HashingCanvas implements Canvas {
 /// boundaries and common layer effects so the capture is a self-contained
 /// recording that never borrows layers from the live tree.
 class _GlassCaptureContext extends PaintingContext {
-  _GlassCaptureContext(super.layer, super.bounds, this._hasher, this._scope);
+  _GlassCaptureContext(
+    super.layer,
+    super.bounds,
+    this._hasher,
+    this._scope, {
+    this.registerGlass = true,
+  });
 
   final _FrameHasher _hasher;
   final RenderGlassScope _scope;
+
+  /// False while recording a pane's child: nested glass is skipped silently
+  /// instead of registered (the registry is built by the main capture walk).
+  final bool registerGlass;
+
   Canvas? _inner;
   _HashingCanvas? _wrapped;
 
@@ -555,14 +568,20 @@ class _GlassCaptureContext extends PaintingContext {
 
   @override
   PaintingContext createChildContext(ContainerLayer childLayer, Rect bounds) =>
-      _GlassCaptureContext(childLayer, bounds, _hasher, _scope);
+      _GlassCaptureContext(
+        childLayer,
+        bounds,
+        _hasher,
+        _scope,
+        registerGlass: registerGlass,
+      );
 
   @override
   void paintChild(RenderObject child, Offset offset) {
     if (child is RenderLiquidGlassContainer) {
       // Glass never enters the backdrop, but the visit builds the paint-order
       // registry that drives glass-through-glass compositing.
-      _scope._registerGlass(child, offset);
+      if (registerGlass) _scope._registerGlass(child, offset);
       return;
     }
     if (child.isRepaintBoundary) {
@@ -693,53 +712,125 @@ class _GlassCaptureContext extends PaintingContext {
   }
 }
 
+/// How [GlassBackdropScope] renders its glass panes.
+enum GlassRenderMode {
+  /// [capture] everywhere except CanvasKit web builds (dart2js —
+  /// `kIsWeb && !kIsWasm`), which get [backdropFilter]: there `toImageSync`
+  /// is a synchronous GPU readback, making the capture pipeline slow.
+  auto,
+
+  /// Full capture pipeline: real refraction, dispersion, and
+  /// backdrop-derived glare sampled from a retained capture of the scope.
+  capture,
+
+  /// BackdropFilter fallback: clipped backdrop blur + lens magnification +
+  /// a backdrop-independent lighting shader. No capture or readbacks.
+  /// Not reproduced: chromatic dispersion, `blurEdge: false`, and the
+  /// backdrop-derived glare color.
+  backdropFilter,
+}
+
 /// Wrap the app (or any subtree) once; every [LiquidGlassContainer] below it
 /// samples this subtree's pixels as its backdrop.
+///
+/// [settings] become the inherited defaults for every descendant container;
+/// a container's own [LiquidGlassContainer.settings] override them
+/// field-wise (see [LiquidGlassSettings]).
 ///
 /// The scope re-records the backdrop whenever the subtree repaints, but only
 /// re-rasterizes (and bumps [RenderGlassScope.generation]) when the recorded
 /// content actually changed — glass moving over a static backdrop reuses the
 /// previous capture.
-///
-/// On CanvasKit builds (dart2js — `kIsWeb && !kIsWasm`) `toImageSync` is a
-/// synchronous GPU readback, so the capture pipeline is replaced by a
-/// BackdropFilter-based fallback: no capture, no readbacks; containers become
-/// clipped backdrop-blur layers plus a backdrop-independent lighting shader.
-class GlassBackdropScope extends SingleChildRenderObjectWidget {
+class GlassBackdropScope extends StatelessWidget {
   const GlassBackdropScope({
     super.key,
-    this.fallbackOnCanvasKit = true,
-    this.forceFallback = false,
+    this.settings,
+    this.renderMode = GlassRenderMode.auto,
+    required this.child,
+  });
+
+  /// Inherited settings for descendant containers; null fields fall back to
+  /// [LiquidGlassSettings.defaults].
+  final LiquidGlassSettings? settings;
+
+  /// Rendering strategy; [GlassRenderMode.auto] picks per platform.
+  final GlassRenderMode renderMode;
+
+  final Widget child;
+
+  static GlassRenderMode _resolveMode(GlassRenderMode mode) =>
+      mode == GlassRenderMode.auto
+      ? (kIsWeb && !kIsWasm
+            ? GlassRenderMode.backdropFilter
+            : GlassRenderMode.capture)
+      : mode;
+
+  /// The fully resolved settings containers inherit at [context]
+  /// ([LiquidGlassSettings.defaults] when no scope is above).
+  static LiquidGlassSettings settingsOf(BuildContext context) =>
+      LiquidGlassSettings.defaults.merge(
+        context
+            .dependOnInheritedWidgetOfExactType<_GlassScopeMarker>()
+            ?.settings,
+      );
+
+  /// The resolved render mode at [context] (never [GlassRenderMode.auto]);
+  /// the platform default when no scope is above. Lets apps adapt to the
+  /// fallback's missing effects (see [GlassRenderMode.backdropFilter]).
+  static GlassRenderMode renderModeOf(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<_GlassScopeMarker>()
+          ?.renderMode ??
+      _resolveMode(GlassRenderMode.auto);
+
+  @override
+  Widget build(BuildContext context) {
+    final resolved = _resolveMode(renderMode);
+    return _GlassScopeMarker(
+      settings: settings,
+      renderMode: resolved,
+      child: _RawGlassScope(
+        useFallback: resolved == GlassRenderMode.backdropFilter,
+        child: child,
+      ),
+    );
+  }
+}
+
+class _GlassScopeMarker extends InheritedWidget {
+  const _GlassScopeMarker({
+    required this.settings,
+    required this.renderMode,
     required super.child,
   });
 
-  /// Use the BackdropFilter fallback when running on CanvasKit.
-  final bool fallbackOnCanvasKit;
-
-  /// Use the fallback on every backend (visual comparison / debugging).
-  final bool forceFallback;
+  final LiquidGlassSettings? settings;
+  final GlassRenderMode renderMode; // resolved, never auto
 
   @override
-  RenderGlassScope createRenderObject(BuildContext context) => RenderGlassScope(
-    View.of(context).devicePixelRatio,
-    fallbackOnCanvasKit,
-    forceFallback,
-  );
+  bool updateShouldNotify(_GlassScopeMarker oldWidget) =>
+      settings != oldWidget.settings || renderMode != oldWidget.renderMode;
+}
+
+class _RawGlassScope extends SingleChildRenderObjectWidget {
+  const _RawGlassScope({required this.useFallback, required super.child});
+
+  final bool useFallback;
+
+  @override
+  RenderGlassScope createRenderObject(BuildContext context) =>
+      RenderGlassScope(View.of(context).devicePixelRatio, useFallback);
 
   @override
   void updateRenderObject(BuildContext context, RenderGlassScope renderObject) {
     renderObject
       ..devicePixelRatio = View.of(context).devicePixelRatio
-      ..setFallbackFlags(fallbackOnCanvasKit, forceFallback);
+      ..useFallback = useFallback;
   }
 }
 
 class RenderGlassScope extends RenderProxyBox {
-  RenderGlassScope(
-    this._devicePixelRatio,
-    bool fallbackOnCanvasKit,
-    bool forceFallback,
-  ) : _fallbackActive = _resolveFallback(fallbackOnCanvasKit, forceFallback);
+  RenderGlassScope(this._devicePixelRatio, this._fallbackActive);
 
   double _devicePixelRatio;
   double get devicePixelRatio => _devicePixelRatio;
@@ -751,14 +842,10 @@ class RenderGlassScope extends RenderProxyBox {
 
   bool _fallbackActive;
 
-  static bool _resolveFallback(bool onCanvasKit, bool force) =>
-      force || (onCanvasKit && kIsWeb && !kIsWasm);
-
   /// Whether containers paint via the BackdropFilter fallback.
   bool get fallbackActive => _fallbackActive;
 
-  void setFallbackFlags(bool onCanvasKit, bool force) {
-    final active = _resolveFallback(onCanvasKit, force);
+  set useFallback(bool active) {
     if (active == _fallbackActive) return;
     _fallbackActive = active;
     if (active) {
@@ -825,16 +912,85 @@ class RenderGlassScope extends RenderProxyBox {
   /// composite textures (which bake lower panes' output) are keyed on it.
   int _glassEpoch = 0;
 
+  /// Sequence source for [_GlassEntry.childSeq] (unhashable child content).
+  int _frameSeq = 0;
+
+  /// Records each sampled pane's child into its entry (scope-logical
+  /// coordinates), so upper panes composite the child along with the glass.
+  /// Children are inlined through the same hashing context as the backdrop:
+  /// the hash folds into the glass state so child content changes invalidate
+  /// upper panes' composited textures. Content that can't be recorded into
+  /// pictures (platform views, textures) is omitted from the refraction.
+  void _recordChildren() {
+    for (var i = 0; i < _entries.length; i++) {
+      final e = _entries[i];
+      final childBox = e.container.child;
+      if (childBox == null) continue;
+      var sampled = false;
+      for (var j = i + 1; j < _entries.length; j++) {
+        if (_entries[j].sampleBounds.overlaps(e.paintBounds)) {
+          sampled = true;
+          break;
+        }
+      }
+      if (!sampled) continue;
+      final hasher = _FrameHasher();
+      final root = ContainerLayer();
+      final ctx = _GlassCaptureContext(
+        root,
+        Offset.zero & size,
+        hasher,
+        this,
+        registerGlass: false,
+      );
+      final childOffset = (childBox.parentData! as BoxParentData).offset;
+      ctx.paintChild(
+        childBox,
+        e.glassPx.topLeft / _devicePixelRatio + childOffset,
+      );
+      // ignore: invalid_use_of_protected_member
+      ctx.stopRecordingIfNeeded();
+      e.childLayer = root;
+      e.childPictures = _collectPictures(root);
+      e.childHashA = hasher.a;
+      e.childHashB = hasher.b;
+      // FragmentShader paints can mutate without a hash change: force the
+      // state to differ every frame so the composite never goes stale.
+      e.childSeq = hasher.poisoned ? ++_frameSeq : 0;
+    }
+  }
+
+  /// The push* overrides force everything inline, so the recorded layer tree
+  /// is (possibly nested) PictureLayers plus unrecordable layers, which are
+  /// skipped.
+  static List<ui.Picture> _collectPictures(ContainerLayer root) {
+    final out = <ui.Picture>[];
+    void visit(Layer? l) {
+      for (; l != null; l = l.nextSibling) {
+        if (l is PictureLayer) {
+          final p = l.picture;
+          if (p != null) out.add(p);
+        } else if (l is ContainerLayer) {
+          visit(l.firstChild);
+        }
+      }
+    }
+
+    visit(root.firstChild);
+    return out;
+  }
+
   void _registerGlass(RenderLiquidGlassContainer c, Offset offsetLogical) {
     final dpr = _devicePixelRatio;
     final glassPx = (offsetLogical * dpr) & c.size * dpr;
-    final cfg = c.config;
     // Overlap-test bounds are deliberately tight (glass body + AA margin, and
     // for sampling the blur smear): the theoretical refraction reach covers a
     // ~1px rim band at extreme angles — not worth per-frame compositing for
     // panes that merely sit near each other.
     final paintBounds = glassPx.inflate(2 * dpr);
-    final sampleBounds = glassPx.inflate(8 * dpr + 2.0 * cfg.blurRadius);
+    final sampleBounds = glassPx.inflate(
+      8 * dpr + 2.0 * c.settings.blurRadius! * dpr,
+    );
     _entryIndex[c] = _entries.length;
     _entries.add(
       _GlassEntry(c, glassPx, paintBounds, sampleBounds, c._stateHash(glassPx)),
@@ -844,6 +1000,7 @@ class RenderGlassScope extends RenderProxyBox {
   void _clearEntries() {
     for (final e in _entries) {
       e.picture?.dispose();
+      e.childLayer?.dispose(); // also disposes the pictures it owns
     }
     _entries.clear();
     _entryIndex.clear();
@@ -979,6 +1136,7 @@ class RenderGlassScope extends RenderProxyBox {
     // ignore: invalid_use_of_protected_member
     captureContext.stopRecordingIfNeeded();
     capturing = false;
+    _recordChildren();
 
     final bool unchanged =
         _captureLayer != null &&
@@ -1003,8 +1161,12 @@ class RenderGlassScope extends RenderProxyBox {
     _hashB = hasher.b;
     _hashValid = !hasher.poisoned;
 
-    // any glass geometry/param change invalidates composited textures
-    final states = [for (final e in _entries) e.stateHash];
+    // any glass geometry/param/child-content change invalidates composited
+    // textures
+    final states = [
+      for (final e in _entries)
+        Object.hash(e.stateHash, e.childHashA, e.childHashB, e.childSeq),
+    ];
     if (!listEquals(states, _prevGlassStates)) {
       _glassEpoch++;
       _prevGlassStates = states;
@@ -1039,98 +1201,178 @@ class _GlassEntry {
   final Rect sampleBounds;
   final int stateHash;
 
-  /// This frame's recorded output (scope-logical coords), set by the
+  /// This frame's recorded glass output (scope-logical coords), set by the
   /// container during its paint when a later pane needs to sample it.
   ui.Picture? picture;
+
+  /// The pane child's recorded output (scope-logical coords), captured by
+  /// [RenderGlassScope._recordChildren] when a later pane samples this one.
+  /// [childLayer] owns the pictures in [childPictures]; disposing it frees
+  /// them.
+  ContainerLayer? childLayer;
+  List<ui.Picture> childPictures = const [];
+  int childHashA = 0, childHashB = 0;
+
+  /// Non-zero (a fresh sequence number) when the child recording contains
+  /// unhashable content, so its state never compares equal across frames.
+  int childSeq = 0;
 }
 
-/// A rounded rectangle with the liquid-glass effect, ported from
+/// A glass pane with the liquid-glass effect, ported from
 /// https://github.com/iyinchao/liquid-glass-studio (STEP 9 composite).
 ///
-/// Must be a descendant of a [GlassBackdropScope]. Parameters mirror the
-/// reference's control panel (same names, scales, and defaults).
+/// Must be a descendant of a [GlassBackdropScope]. Visuals come from
+/// [settings], resolved field-wise over the scope's settings and
+/// [LiquidGlassSettings.defaults]. Pass only the fields to override.
 ///
-/// The optional [child] is laid out within the glass (loose constraints,
-/// centered — wrap it in [Align]/[Padding] for other placements) and painted
-/// on top of the pane. It is never part of the backdrop, so it does not get
-/// refracted or blurred. A lower pane's child is not visible through an
-/// overlapping upper pane (only the glass itself composites through).
+/// Sizing follows [Container]: explicit [width]/[height] win; otherwise the
+/// pane wraps [child] (plus [padding]) or, childless, expands to the
+/// incoming constraints. The child is laid out loosely inside the padded
+/// pane at [alignment] and painted on top of the glass: its own pane never
+/// refracts or blurs it, but a pane stacked on top samples it like any other
+/// content below (child content drawn via platform views or textures is the
+/// exception — it can't be recorded, so it is omitted from the upper pane's
+/// refraction). The pane itself hit-tests its exact shape, so corners
+/// outside the superellipse pass touches through.
 class LiquidGlassContainer extends SingleChildRenderObjectWidget {
   const LiquidGlassContainer({
     super.key,
+    this.width,
+    this.height,
+    this.padding = EdgeInsets.zero,
+    this.alignment = Alignment.center,
+    this.clipBehavior = Clip.none,
+    this.settings,
     super.child,
-    this.width = 200,
-    this.height = 200,
-    this.cornerRadius = 80, // % of min(width, height)/2
-    this.roundness = 5, // superellipse corner exponent, 2..7
-    this.refThickness = 20,
-    this.refFactor = 1.4,
-    this.refDispersion = 7,
-    this.refFresnelRange = 30,
-    this.refFresnelHardness = 20, // 0..100
-    this.refFresnelFactor = 20, // 0..100
-    this.glareRange = 30,
-    this.glareHardness = 20, // 0..100
-    this.glareFactor = 90, // 0..120
-    this.glareConvergence = 50, // 0..100
-    this.glareOppositeFactor = 80, // 0..100
-    this.glareAngle = -45, // degrees
-    this.blurRadius = 1, // device px, 1..200
-    this.blurEdge = true,
-    this.tint = const Color(0x00FFFFFF),
-    this.shadowExpand = 25,
-    this.shadowFactor = 15, // 0..100
-    this.shadowPosition = const Offset(0, -10),
   });
 
   /// Optionally call before first build to avoid a blank first frame.
   static Future<void> precache() => _GlassShaders.ensureLoaded();
 
-  final double width;
-  final double height;
-  final double cornerRadius;
-  final double roundness;
-  final double refThickness;
-  final double refFactor;
-  final double refDispersion;
-  final double refFresnelRange;
-  final double refFresnelHardness;
-  final double refFresnelFactor;
-  final double glareRange;
-  final double glareHardness;
-  final double glareFactor;
-  final double glareConvergence;
-  final double glareOppositeFactor;
-  final double glareAngle;
-  final int blurRadius;
-  final bool blurEdge;
-  final Color tint;
-  final double shadowExpand;
-  final double shadowFactor;
-  final Offset shadowPosition;
+  /// Fixed pane size (logical px, constrained by the parent). Null: size to
+  /// [child] + [padding], or expand when childless.
+  final double? width;
+  final double? height;
+
+  /// Space between the pane edge and [child].
+  final EdgeInsetsGeometry padding;
+
+  /// [child]'s placement within the padded pane.
+  final AlignmentGeometry alignment;
+
+  /// Clips [child] to the glass shape when not [Clip.none].
+  final Clip clipBehavior;
+
+  /// Per-pane overrides of the scope's settings (field-wise, null inherits).
+  final LiquidGlassSettings? settings;
+
+  LiquidGlassSettings _resolveSettings(BuildContext context) {
+    final marker = context
+        .dependOnInheritedWidgetOfExactType<_GlassScopeMarker>();
+    assert(() {
+      if (marker == null) {
+        throw FlutterError.fromParts([
+          ErrorSummary(
+            'LiquidGlassContainer used outside a GlassBackdropScope.',
+          ),
+          ErrorDescription(
+            'Glass panes refract the pixels of the subtree wrapped by a '
+            'GlassBackdropScope; without one there is no backdrop to sample.',
+          ),
+          ErrorHint(
+            'Wrap the subtree containing both the backdrop content and the '
+            'glass panes in a GlassBackdropScope.',
+          ),
+        ]);
+      }
+      return true;
+    }());
+    return LiquidGlassSettings.defaults.merge(marker?.settings).merge(settings);
+  }
 
   @override
-  RenderLiquidGlassContainer createRenderObject(BuildContext context) =>
-      RenderLiquidGlassContainer(this);
+  RenderLiquidGlassContainer createRenderObject(BuildContext context) {
+    final direction = Directionality.maybeOf(context) ?? TextDirection.ltr;
+    return RenderLiquidGlassContainer(
+      settings: _resolveSettings(context),
+      width: width,
+      height: height,
+      padding: padding.resolve(direction),
+      alignment: alignment.resolve(direction),
+      clipBehavior: clipBehavior,
+    );
+  }
 
   @override
   void updateRenderObject(
     BuildContext context,
     RenderLiquidGlassContainer renderObject,
   ) {
-    renderObject.config = this;
+    final direction = Directionality.maybeOf(context) ?? TextDirection.ltr;
+    renderObject
+      ..settings = _resolveSettings(context)
+      ..width = width
+      ..height = height
+      ..padding = padding.resolve(direction)
+      ..alignment = alignment.resolve(direction)
+      ..clipBehavior = clipBehavior;
   }
 }
 
 class RenderLiquidGlassContainer extends RenderBox
     with RenderObjectWithChildMixin<RenderBox> {
-  RenderLiquidGlassContainer(this._config);
+  RenderLiquidGlassContainer({
+    required this._settings,
+    required this._width,
+    required this._height,
+    required this._padding,
+    required this._alignment,
+    required this._clipBehavior,
+  });
 
-  LiquidGlassContainer _config;
-  LiquidGlassContainer get config => _config;
-  set config(LiquidGlassContainer value) {
-    _config = value;
+  /// Fully resolved (every field non-null, see [LiquidGlassSettings]).
+  LiquidGlassSettings _settings;
+  LiquidGlassSettings get settings => _settings;
+  set settings(LiquidGlassSettings value) {
+    if (value == _settings) return;
+    _settings = value;
+    markNeedsPaint();
+  }
+
+  double? _width;
+  set width(double? value) {
+    if (value == _width) return;
+    _width = value;
     markNeedsLayout();
+  }
+
+  double? _height;
+  set height(double? value) {
+    if (value == _height) return;
+    _height = value;
+    markNeedsLayout();
+  }
+
+  EdgeInsets _padding;
+  set padding(EdgeInsets value) {
+    if (value == _padding) return;
+    _padding = value;
+    markNeedsLayout();
+  }
+
+  Alignment _alignment;
+  set alignment(Alignment value) {
+    if (value == _alignment) return;
+    _alignment = value;
+    markNeedsLayout();
+  }
+
+  Clip _clipBehavior;
+  set clipBehavior(Clip value) {
+    if (value == _clipBehavior) return;
+    _clipBehavior = value;
+    if (value == Clip.none) _childClip.layer = null;
+    markNeedsPaint();
   }
 
   @override
@@ -1200,15 +1442,37 @@ class RenderLiquidGlassContainer extends RenderBox
 
   @override
   void performLayout() {
-    size = constraints.constrain(Size(_config.width, _config.height));
-    final c = child;
-    if (c != null) {
-      c.layout(BoxConstraints.loose(size), parentUsesSize: true);
-      (c.parentData! as BoxParentData).offset = Offset(
-        (size.width - c.size.width) / 2,
-        (size.height - c.size.height) / 2,
+    // Container semantics: explicit dims win; else wrap child + padding;
+    // else expand to bounded constraints.
+    final c = _width != null || _height != null
+        ? constraints.tighten(width: _width, height: _height)
+        : constraints;
+    final ch = child;
+    if (ch == null) {
+      size = c.constrain(
+        Size(
+          _width ?? (c.hasBoundedWidth ? c.maxWidth : 0),
+          _height ?? (c.hasBoundedHeight ? c.maxHeight : 0),
+        ),
       );
+      return;
     }
+    ch.layout(c.deflate(_padding).loosen(), parentUsesSize: true);
+    size = c.constrain(
+      Size(
+        _width ?? ch.size.width + _padding.horizontal,
+        _height ?? ch.size.height + _padding.vertical,
+      ),
+    );
+    final content = Rect.fromLTRB(
+      _padding.left,
+      _padding.top,
+      size.width - _padding.right,
+      size.height - _padding.bottom,
+    );
+    (ch.parentData! as BoxParentData).offset = _alignment
+        .inscribe(ch.size, content)
+        .topLeft;
   }
 
   @override
@@ -1222,19 +1486,38 @@ class RenderLiquidGlassContainer extends RenderBox
     );
   }
 
+  // The pane is a surface: it absorbs hits within its exact outline (and
+  // only there — square corners outside the superellipse pass through).
+  @override
+  bool hitTestSelf(Offset position) => _glassPathFor(size).contains(position);
+
+  final LayerHandle<ClipPathLayer> _childClip = LayerHandle<ClipPathLayer>();
+
   void _paintChild(PaintingContext context, Offset offset) {
     final c = child;
-    if (c != null) {
-      context.paintChild(c, offset + (c.parentData! as BoxParentData).offset);
+    if (c == null) return;
+    final childOffset = (c.parentData! as BoxParentData).offset;
+    if (_clipBehavior == Clip.none) {
+      context.paintChild(c, offset + childOffset);
+    } else {
+      _childClip.layer = context.pushClipPath(
+        needsCompositing,
+        offset,
+        Offset.zero & size,
+        _glassPathFor(size),
+        (ctx, o) => ctx.paintChild(c, o + childOffset),
+        clipBehavior: _clipBehavior,
+        oldLayer: _childClip.layer,
+      );
     }
   }
 
   /// Superellipse-cornered rounded rect matching the shader's SDF; used for
-  /// the AA edge clip and the drop shadow.
+  /// the AA edge clip, hit testing, and the drop shadow.
   Path _glassPathFor(Size s) {
-    final r = (math.min(s.width, s.height) / 2 * _config.cornerRadius / 100)
-        .clamp(0.0, math.min(s.width, s.height) / 2);
-    final n = _config.roundness;
+    final shape = _settings.shape!;
+    final r = shape.resolveRadius(s);
+    final n = shape.roundness;
     if (_glassPath != null &&
         _pathW == s.width &&
         _pathH == s.height &&
@@ -1325,9 +1608,11 @@ class RenderLiquidGlassContainer extends RenderBox
     // Sampled area (glass + refraction/dispersion/blur reach); lower panes
     // whose output lands inside it must show through this one.
     final needed = glassPx
-        .inflate(_reachFor(_config, dpr).ceilToDouble())
+        .inflate(_reachFor(_settings, dpr).ceilToDouble())
         .intersect(scopePx);
     final lower = scope._lowerIntersecting(this);
+    // texture cache and shader blur operate in integer device px
+    final devBlur = (_settings.blurRadius! * dpr).round();
 
     final ui.Image sharp;
     final ui.Image blurred;
@@ -1337,7 +1622,7 @@ class RenderLiquidGlassContainer extends RenderBox
       // lower panes' recorded output over the backdrop (so this pane refracts
       // them); on an animated backdrop a crop is also far less readback data
       // per frame than the full scope.
-      _ensureCropTextures(scope, needed, scopePx, lower);
+      _ensureCropTextures(scope, needed, scopePx, lower, devBlur);
       sharp = _sharp!;
       blurred = _blurred!;
       texRect = _texCrop!;
@@ -1347,11 +1632,12 @@ class RenderLiquidGlassContainer extends RenderBox
       // like the reference).
       _dropCropTextures();
       sharp = scope.sharpTexture();
-      blurred = scope.blurredTexture(_config.blurRadius);
+      blurred = scope.blurredTexture(devBlur);
       texRect = scopePx;
     }
 
-    final shadowFactor = _config.shadowFactor / 100;
+    _glassPathFor(size); // refreshes _pathR before the uniforms read it
+    final shadowIntensity = _settings.shadowIntensity!;
     _setUniforms(
       _shader ??= _GlassShaders.main.fragmentShader(),
       scopePx,
@@ -1361,9 +1647,9 @@ class RenderLiquidGlassContainer extends RenderBox
       texRect,
       sharp,
       blurred,
-      shadowFactor,
+      shadowIntensity,
     );
-    _paintGlass(context.canvas, offset, _shader!, shadowFactor);
+    _paintGlass(context.canvas, offset, _shader!, shadowIntensity);
 
     // If a later pane samples this one, record the same output (in scope
     // coordinates) so it can be composited into that pane's backdrop.
@@ -1380,10 +1666,10 @@ class RenderLiquidGlassContainer extends RenderBox
         texRect,
         sharp,
         blurred,
-        shadowFactor,
+        shadowIntensity,
       );
       final rec = ui.PictureRecorder();
-      _paintGlass(Canvas(rec), originLogical, ps, shadowFactor);
+      _paintGlass(Canvas(rec), originLogical, ps, shadowIntensity);
       entry.picture?.dispose();
       entry.picture = rec.endRecording();
     }
@@ -1394,46 +1680,23 @@ class RenderLiquidGlassContainer extends RenderBox
   /// Max sampling offset in device px: refraction (70.71 * cot(asin(1/n)) *
   /// dpr, per the shader's normal magnitude) times the dispersion scale, plus
   /// 2*blurRadius for the gaussian.
-  static double _reachFor(LiquidGlassContainer cfg, double dpr) {
-    final edgeFactorMax = cfg.refFactor <= 1
-        ? 0.0
-        : 1 / math.tan(math.asin(1 / cfg.refFactor));
-    return 70.71 * edgeFactorMax * dpr * (1 + 0.02 * cfg.refDispersion) +
-        2.0 * cfg.blurRadius +
+  static double _reachFor(LiquidGlassSettings cfg, double dpr) {
+    final ior = cfg.indexOfRefraction!;
+    final edgeFactorMax = ior <= 1 ? 0.0 : 1 / math.tan(math.asin(1 / ior));
+    return 70.71 * edgeFactorMax * dpr * (1 + 0.02 * cfg.dispersion!) +
+        2.0 * cfg.blurRadius! * dpr +
         2;
   }
 
   /// Everything that determines this pane's rendered output (given the same
   /// backdrop); folded into the scope's glass epoch.
-  int _stateHash(Rect glassPx) {
-    final c = _config;
-    return Object.hashAll([
-      glassPx.left,
-      glassPx.top,
-      glassPx.right,
-      glassPx.bottom,
-      c.cornerRadius,
-      c.roundness,
-      c.refThickness,
-      c.refFactor,
-      c.refDispersion,
-      c.refFresnelRange,
-      c.refFresnelHardness,
-      c.refFresnelFactor,
-      c.glareRange,
-      c.glareHardness,
-      c.glareFactor,
-      c.glareConvergence,
-      c.glareOppositeFactor,
-      c.glareAngle,
-      c.blurRadius,
-      c.blurEdge,
-      c.tint,
-      c.shadowExpand,
-      c.shadowFactor,
-      c.shadowPosition,
-    ]);
-  }
+  int _stateHash(Rect glassPx) => Object.hash(
+    glassPx.left,
+    glassPx.top,
+    glassPx.right,
+    glassPx.bottom,
+    _settings,
+  );
 
   /// Draws the drop shadow and the clipped glass rect at [drawOrigin] in the
   /// canvas's current space (scene: logical local px; recording: scope
@@ -1442,15 +1705,15 @@ class RenderLiquidGlassContainer extends RenderBox
     Canvas canvas,
     Offset drawOrigin,
     ui.FragmentShader shader,
-    double shadowFactor,
+    double shadowIntensity,
   ) {
     final glassPath = _glassPathFor(size);
 
     // Drop shadow: the reference's exp(-|sdf|/expand) falloff, approximated
     // by a gaussian mask blur of the shape (deviation: gaussian tail, and
     // multiplicative rather than subtractive darkening).
-    if (shadowFactor > 0) {
-      _paintShadow(canvas, glassPath, drawOrigin, shadowFactor);
+    if (shadowIntensity > 0) {
+      _paintShadow(canvas, glassPath, drawOrigin, shadowIntensity);
     }
 
     // Glass composite: one direct draw, edge anti-aliased by the clip.
@@ -1464,22 +1727,20 @@ class RenderLiquidGlassContainer extends RenderBox
     Canvas canvas,
     Path glassPath,
     Offset drawOrigin,
-    double shadowFactor,
+    double shadowIntensity,
   ) {
-    // reference offsets the shadow SDF by -shadowPosition in y-up coords
-    final shift = Offset(_config.shadowPosition.dx, -_config.shadowPosition.dy);
     canvas.drawPath(
-      glassPath.shift(drawOrigin + shift),
+      glassPath.shift(drawOrigin + _settings.shadowOffset!),
       Paint()
         ..color = Color.fromARGB(
-          (255 * (0.6 * shadowFactor).clamp(0.0, 1.0)).round(),
+          (255 * (0.6 * shadowIntensity).clamp(0.0, 1.0)).round(),
           0,
           0,
           0,
         )
         ..maskFilter = MaskFilter.blur(
           BlurStyle.normal,
-          math.max(_config.shadowExpand, 0.1),
+          math.max(_settings.shadowBlur!, 0.1),
         ),
     );
   }
@@ -1493,9 +1754,9 @@ class RenderLiquidGlassContainer extends RenderBox
     Rect texRect,
     ui.Image sharp,
     ui.Image blurred,
-    double shadowFactor,
+    double shadowIntensity,
   ) {
-    final cfg = _config;
+    final cfg = _settings;
     var i = 0;
     s.setFloat(i++, scopePx.width); // u_scopeRes
     s.setFloat(i++, scopePx.height);
@@ -1507,29 +1768,29 @@ class RenderLiquidGlassContainer extends RenderBox
     s.setFloat(i++, originScope.dx); // u_originScope
     s.setFloat(i++, originScope.dy);
     s.setFloat(i++, _pathR); // u_shapeRadius (computed by _glassPathFor)
-    s.setFloat(i++, cfg.roundness); // u_shapeRoundness
-    final tint = cfg.tint;
+    s.setFloat(i++, cfg.shape!.roundness); // u_shapeRoundness
+    final tint = cfg.tint!;
     s.setFloat(i++, tint.r); // u_tint
     s.setFloat(i++, tint.g);
     s.setFloat(i++, tint.b);
     s.setFloat(i++, tint.a);
-    s.setFloat(i++, cfg.refThickness);
-    s.setFloat(i++, cfg.refFactor);
-    s.setFloat(i++, cfg.refDispersion);
-    s.setFloat(i++, cfg.refFresnelRange);
-    s.setFloat(i++, cfg.refFresnelHardness / 100);
-    s.setFloat(i++, cfg.refFresnelFactor / 100);
-    s.setFloat(i++, cfg.glareRange);
-    s.setFloat(i++, cfg.glareHardness / 100);
-    s.setFloat(i++, cfg.glareConvergence / 100);
-    s.setFloat(i++, cfg.glareOppositeFactor / 100);
-    s.setFloat(i++, cfg.glareFactor / 100);
-    s.setFloat(i++, cfg.glareAngle * math.pi / 180);
-    s.setFloat(i++, cfg.blurEdge ? 1 : 0);
-    s.setFloat(i++, cfg.shadowExpand);
-    s.setFloat(i++, shadowFactor);
-    s.setFloat(i++, cfg.shadowPosition.dx); // u_shadowOffset (y-down)
-    s.setFloat(i++, -cfg.shadowPosition.dy);
+    s.setFloat(i++, cfg.thickness!);
+    s.setFloat(i++, cfg.indexOfRefraction!);
+    s.setFloat(i++, cfg.dispersion!);
+    s.setFloat(i++, cfg.fresnelRange!);
+    s.setFloat(i++, cfg.fresnelHardness!);
+    s.setFloat(i++, cfg.fresnelIntensity!);
+    s.setFloat(i++, cfg.glareRange!);
+    s.setFloat(i++, cfg.glareHardness!);
+    s.setFloat(i++, cfg.glareConvergence!);
+    s.setFloat(i++, cfg.glareOppositeIntensity!);
+    s.setFloat(i++, cfg.glareIntensity!);
+    s.setFloat(i++, cfg.glareAngle!);
+    s.setFloat(i++, cfg.blurEdge! ? 1 : 0);
+    s.setFloat(i++, cfg.shadowBlur!);
+    s.setFloat(i++, shadowIntensity);
+    s.setFloat(i++, cfg.shadowOffset!.dx); // u_shadowOffset (y-down)
+    s.setFloat(i++, cfg.shadowOffset!.dy);
     s.setFloat(i++, texRect.left); // u_cropOrigin
     s.setFloat(i++, texRect.top);
     s.setFloat(i++, texRect.width); // u_cropSize
@@ -1546,9 +1807,9 @@ class RenderLiquidGlassContainer extends RenderBox
     Rect needed,
     Rect scopePx,
     List<_GlassEntry> lower,
+    int radius, // blur radius, device px
   ) {
     final dpr = scope.devicePixelRatio;
-    final radius = _config.blurRadius;
     final kind = lower.isEmpty ? 0 : 1;
     if (_texGen == scope.generation &&
         _texDpr == dpr &&
@@ -1607,6 +1868,9 @@ class RenderLiquidGlassContainer extends RenderBox
       for (final e in lower) {
         final pic = e.picture;
         if (pic != null) c.drawPicture(pic);
+        for (final cp in e.childPictures) {
+          c.drawPicture(cp);
+        }
       }
       final pic = rec.endRecording();
       _sharp = pic.toImageSync(crop.width.toInt(), crop.height.toInt());
@@ -1655,18 +1919,15 @@ class RenderLiquidGlassContainer extends RenderBox
   /// refraction displacement at half band depth (70.71 * edgeFactor logical
   /// px, see [_reachFor]), spread uniformly over the pane.
   double _lensScale() {
-    final cfg = _config;
     final minHalf = math.min(size.width, size.height) / 2;
-    final t = cfg.refThickness;
-    if (_fbMinHalf != minHalf || _fbT != t || _fbIor != cfg.refFactor) {
+    final t = _settings.thickness!;
+    final ior = _settings.indexOfRefraction!;
+    if (_fbMinHalf != minHalf || _fbT != t || _fbIor != ior) {
       _fbLens =
-          1 +
-          70.71 *
-              _edgeFactorAt(t * 0.5, t, cfg.refFactor) /
-              math.max(minHalf, 1);
+          1 + 70.71 * _edgeFactorAt(t * 0.5, t, ior) / math.max(minHalf, 1);
       _fbMinHalf = minHalf;
       _fbT = t;
-      _fbIor = cfg.refFactor;
+      _fbIor = ior;
     }
     return _fbLens;
   }
@@ -1708,36 +1969,32 @@ class RenderLiquidGlassContainer extends RenderBox
   ) {
     _dropCropTextures(); // frees capture-pipeline leftovers; no-op afterwards
     final glassPath = _glassPathFor(size); // also refreshes _pathR
-    final shadowFactor = _config.shadowFactor / 100;
+    final shadowIntensity = _settings.shadowIntensity!;
 
     // Exterior-only drop shadow: the pane region must stay clear, or the
     // BackdropFilters would blur the shadow into the glass (the interior
     // term lives in the overlay shader, like the reference).
-    if (shadowFactor > 0) {
+    if (shadowIntensity > 0) {
       final canvas = context.canvas;
-      final blur = math.max(_config.shadowExpand, 0.1);
-      final shift = Offset(
-        _config.shadowPosition.dx,
-        -_config.shadowPosition.dy,
-      );
+      final blur = math.max(_settings.shadowBlur!, 0.1);
       final exterior = Path()
         ..fillType = PathFillType.evenOdd
-        ..addRect(((offset + shift) & size).inflate(3 * blur))
+        ..addRect(((offset + _settings.shadowOffset!) & size).inflate(3 * blur))
         ..addPath(glassPath, offset);
       canvas.save();
       canvas.clipPath(exterior);
-      _paintShadow(canvas, glassPath, offset, shadowFactor);
+      _paintShadow(canvas, glassPath, offset, shadowIntensity);
       canvas.restore();
     }
 
     final dpr = scope.devicePixelRatio;
-    final radius = _config.blurRadius;
-    // radius <= 2 is sub-pixel at 1x, same threshold as the capture pipeline;
-    // sigma is in logical px here (the compositor scales it by dpr)
-    final ui.ImageFilter? blurF = radius > 2
+    final radius = _settings.blurRadius!;
+    // device radius <= 2 is sub-pixel, same threshold as the capture
+    // pipeline; sigma is in logical px (the compositor scales it by dpr)
+    final ui.ImageFilter? blurF = radius * dpr > 2
         ? ui.ImageFilter.blur(
-            sigmaX: radius / 3.0 / dpr,
-            sigmaY: radius / 3.0 / dpr,
+            sigmaX: radius / 3.0,
+            sigmaY: radius / 3.0,
             tileMode: TileMode.clamp,
           )
         : null;
@@ -1753,7 +2010,7 @@ class RenderLiquidGlassContainer extends RenderBox
     // lighting overlay (interior shadow, tint, fresnel, glare) on top;
     // re-fetch the canvas: pushLayer ended the previous recording
     final os = _overlayShader ??= _GlassShaders.overlay.fragmentShader();
-    _setOverlayUniforms(os, scope, offset, shadowFactor);
+    _setOverlayUniforms(os, scope, offset, shadowIntensity);
     final canvas = context.canvas;
     canvas.save();
     canvas.clipPath(glassPath.shift(offset));
@@ -1767,9 +2024,9 @@ class RenderLiquidGlassContainer extends RenderBox
     ui.FragmentShader s,
     RenderGlassScope scope,
     Offset drawOrigin,
-    double shadowFactor,
+    double shadowIntensity,
   ) {
-    final cfg = _config;
+    final cfg = _settings;
     final dpr = scope.devicePixelRatio;
     var i = 0;
     s.setFloat(i++, (scope.size.width * dpr).ceilToDouble()); // u_scopeRes
@@ -1780,27 +2037,27 @@ class RenderLiquidGlassContainer extends RenderBox
     s.setFloat(i++, size.width); // u_size
     s.setFloat(i++, size.height);
     s.setFloat(i++, _pathR); // u_shapeRadius
-    s.setFloat(i++, cfg.roundness); // u_shapeRoundness
-    final tint = cfg.tint;
+    s.setFloat(i++, cfg.shape!.roundness); // u_shapeRoundness
+    final tint = cfg.tint!;
     s.setFloat(i++, tint.r); // u_tint
     s.setFloat(i++, tint.g);
     s.setFloat(i++, tint.b);
     s.setFloat(i++, tint.a);
-    s.setFloat(i++, cfg.refThickness);
-    s.setFloat(i++, cfg.refFactor);
-    s.setFloat(i++, cfg.refFresnelRange);
-    s.setFloat(i++, cfg.refFresnelHardness / 100);
-    s.setFloat(i++, cfg.refFresnelFactor / 100);
-    s.setFloat(i++, cfg.glareRange);
-    s.setFloat(i++, cfg.glareHardness / 100);
-    s.setFloat(i++, cfg.glareConvergence / 100);
-    s.setFloat(i++, cfg.glareOppositeFactor / 100);
-    s.setFloat(i++, cfg.glareFactor / 100);
-    s.setFloat(i++, cfg.glareAngle * math.pi / 180);
-    s.setFloat(i++, cfg.shadowExpand);
-    s.setFloat(i++, shadowFactor);
-    s.setFloat(i++, cfg.shadowPosition.dx); // u_shadowOffset (y-down)
-    s.setFloat(i++, -cfg.shadowPosition.dy);
+    s.setFloat(i++, cfg.thickness!);
+    s.setFloat(i++, cfg.indexOfRefraction!);
+    s.setFloat(i++, cfg.fresnelRange!);
+    s.setFloat(i++, cfg.fresnelHardness!);
+    s.setFloat(i++, cfg.fresnelIntensity!);
+    s.setFloat(i++, cfg.glareRange!);
+    s.setFloat(i++, cfg.glareHardness!);
+    s.setFloat(i++, cfg.glareConvergence!);
+    s.setFloat(i++, cfg.glareOppositeIntensity!);
+    s.setFloat(i++, cfg.glareIntensity!);
+    s.setFloat(i++, cfg.glareAngle!);
+    s.setFloat(i++, cfg.shadowBlur!);
+    s.setFloat(i++, shadowIntensity);
+    s.setFloat(i++, cfg.shadowOffset!.dx); // u_shadowOffset (y-down)
+    s.setFloat(i++, cfg.shadowOffset!.dy);
   }
 
   @override
@@ -1813,7 +2070,7 @@ class RenderLiquidGlassContainer extends RenderBox
     _overlayShader?.dispose();
     _overlayShader = null;
     _releaseFbLayers();
+    _childClip.layer = null;
     super.dispose();
   }
 }
-

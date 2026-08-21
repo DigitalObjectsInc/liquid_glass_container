@@ -60,7 +60,7 @@ class _HarnessState extends State<_Harness> {
             Positioned(
               left: pos.dx,
               top: pos.dy,
-              child: const LiquidGlassContainer(),
+              child: const LiquidGlassContainer(width: 200, height: 200),
             ),
           ],
         ),
@@ -97,10 +97,12 @@ void main() {
                   child: LiquidGlassContainer(
                     width: 300,
                     height: 200,
-                    refThickness: 40,
-                    refDispersion: 30,
-                    blurRadius: 60,
-                    tint: Color(0x33FF8800),
+                    settings: LiquidGlassSettings(
+                      thickness: 40,
+                      dispersion: 30,
+                      blurRadius: 30, // 60 device px at dpr 2
+                      tint: Color(0x33FF8800),
+                    ),
                   ),
                 ),
               ],
@@ -143,10 +145,122 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.text('press'), findsOneWidget);
-    // centered within the default 200x200 pane at the surface center
+    // pane wraps the child, centered at the surface center
     expect(tester.getCenter(find.byType(TextButton)), const Offset(300, 300));
     await tester.tap(find.byType(TextButton));
     expect(tapped, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('container sizing: wraps child + padding, expands childless', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: _CheckerboardPainter()),
+                const Center(
+                  child: LiquidGlassContainer(
+                    padding: EdgeInsets.all(20),
+                    child: SizedBox(width: 100, height: 50),
+                  ),
+                ),
+                const Positioned(
+                  left: 0,
+                  top: 0,
+                  width: 300,
+                  height: 240,
+                  child: LiquidGlassContainer(),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final panes = find.byType(LiquidGlassContainer);
+    expect(tester.getSize(panes.first), const Size(140, 90));
+    expect(tester.getSize(panes.last), const Size(300, 240));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('scope settings are inherited and overridden field-wise', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            settings: const LiquidGlassSettings(thickness: 42, dispersion: 12),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: _CheckerboardPainter()),
+                const Center(
+                  child: LiquidGlassContainer(
+                    width: 200,
+                    height: 200,
+                    settings: LiquidGlassSettings(dispersion: 3),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final pane = tester.renderObject<RenderLiquidGlassContainer>(
+      find.byType(LiquidGlassContainer),
+    );
+    expect(pane.settings.thickness, 42); // from the scope
+    expect(pane.settings.dispersion, 3); // container override wins
+    expect(
+      pane.settings.indexOfRefraction,
+      LiquidGlassSettings.defaults.indexOfRefraction,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('pane hit-tests its shape: absorbs inside, corners pass', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    var behind = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => behind++,
+                ),
+                const Center(
+                  child: LiquidGlassContainer(width: 200, height: 200),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    // pane interior absorbs the tap
+    await tester.tapAt(const Offset(300, 300));
+    expect(behind, 0);
+    // pane corner (outside the superellipse outline) passes through
+    await tester.tapAt(const Offset(202, 202));
+    expect(behind, 1);
     expect(tester.takeException(), isNull);
   });
 
@@ -226,14 +340,18 @@ void main() {
                     left: 100,
                     top: 100,
                     child: LiquidGlassContainer(
-                      blurRadius: 40,
-                      tint: Color(0x99FF6600),
+                      width: 200,
+                      height: 200,
+                      settings: LiquidGlassSettings(
+                        blurRadius: 20, // 40 device px at dpr 2
+                        tint: Color(0x99FF6600),
+                      ),
                     ),
                   ),
                   const Positioned(
                     left: 220,
                     top: 140,
-                    child: LiquidGlassContainer(),
+                    child: LiquidGlassContainer(width: 200, height: 200),
                   ),
                 ],
               ),
@@ -264,18 +382,141 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('lower pane child is sampled through an overlapping pane', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CustomPaint(painter: _CheckerboardPainter()),
+                  // lower pane filled by an opaque red child
+                  Positioned(
+                    left: 100,
+                    top: 100,
+                    child: LiquidGlassContainer(
+                      width: 200,
+                      height: 200,
+                      child: Container(color: const Color(0xFFFF0000)),
+                    ),
+                  ),
+                  const Positioned(
+                    left: 220,
+                    top: 140,
+                    child: LiquidGlassContainer(width: 200, height: 200),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byType(RepaintBoundary).first,
+    );
+    final image = await tester.runAsync(() => boundary.toImage());
+    final data = await tester.runAsync(
+      () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
+    );
+    int channel(int x, int y, int c) =>
+        data!.getUint8((y * image!.width + x) * 4 + c);
+    // interior of the top pane over the red child: the child must show
+    // through the upper glass
+    final rOverlap = channel(280, 250, 0), bOverlap = channel(280, 250, 2);
+    expect(rOverlap - bOverlap, greaterThan(60));
+    // top pane's interior past the lower pane stays neutral checkerboard
+    final rPlain = channel(390, 230, 0), bPlain = channel(390, 230, 2);
+    expect((rPlain - bPlain).abs(), lessThan(10));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('child content change refreshes what the upper pane shows', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    var childColor = const Color(0xFFFF0000);
+    late StateSetter setColor;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CustomPaint(painter: _CheckerboardPainter()),
+                  Positioned(
+                    left: 100,
+                    top: 100,
+                    child: LiquidGlassContainer(
+                      width: 200,
+                      height: 200,
+                      child: StatefulBuilder(
+                        builder: (context, setState) {
+                          setColor = setState;
+                          return Container(color: childColor);
+                        },
+                      ),
+                    ),
+                  ),
+                  const Positioned(
+                    left: 220,
+                    top: 140,
+                    child: LiquidGlassContainer(width: 200, height: 200),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    setColor(() => childColor = const Color(0xFF0000FF));
+    await tester.pump();
+    await tester.pump();
+
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byType(RepaintBoundary).first,
+    );
+    final image = await tester.runAsync(() => boundary.toImage());
+    final data = await tester.runAsync(
+      () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
+    );
+    int channel(int x, int y, int c) =>
+        data!.getUint8((y * image!.width + x) * 4 + c);
+    // the upper pane must show the child's new blue, not a stale red crop
+    final r = channel(280, 250, 0), b = channel(280, 250, 2);
+    expect(b - r, greaterThan(60));
+    expect(tester.takeException(), isNull);
+  });
+
   Widget fallbackApp({Widget? child}) => MaterialApp(
     home: Scaffold(
       body: GlassBackdropScope(
-        forceFallback: true,
+        renderMode: GlassRenderMode.backdropFilter,
         child: Stack(
           fit: StackFit.expand,
           children: [
             CustomPaint(painter: _CheckerboardPainter()),
             Center(
               child: LiquidGlassContainer(
-                blurRadius: 40,
-                refThickness: 30,
+                width: 200,
+                height: 200,
+                settings: const LiquidGlassSettings(
+                  blurRadius: 20, // 40 device px at dpr 2
+                  thickness: 30,
+                ),
                 child: child,
               ),
             ),
@@ -285,7 +526,8 @@ void main() {
     ),
   );
 
-  testWidgets('forceFallback renders BackdropFilter stack, never captures', (
+  testWidgets('backdropFilter mode renders BackdropFilter stack, never '
+      'captures', (
     tester,
   ) async {
     await _setUp(tester);
@@ -314,12 +556,14 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: GlassBackdropScope(
-            fallbackOnCanvasKit: false,
+            renderMode: GlassRenderMode.capture,
             child: Stack(
               fit: StackFit.expand,
               children: [
                 CustomPaint(painter: _CheckerboardPainter()),
-                const Center(child: LiquidGlassContainer()),
+                const Center(
+                  child: LiquidGlassContainer(width: 200, height: 200),
+                ),
               ],
             ),
           ),
