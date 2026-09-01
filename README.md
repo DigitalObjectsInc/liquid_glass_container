@@ -2,6 +2,8 @@
 
 Liquid glass for Flutter — real refraction, chromatic dispersion, fresnel, glare, backdrop blur, tint, superellipse corners, and drop shadow, rendered in a single fragment-shader draw per pane. A Flutter port of [liquid-glass-studio](https://github.com/iyinchao/liquid-glass-studio)'s WebGL effect (final STEP 9 composite). One implementation for iOS, Android, desktop, and web.
 
+![Liquid glass panes over a wallpaper](doc/hero.png)
+
 ## Usage
 
 Wrap the app (or any subtree) once, then drop containers anywhere below it:
@@ -89,7 +91,9 @@ Measured in Chrome CanvasKit, 1200×900, 5 panes, profile build: fallback ~18 ms
 
 ## Example
 
-`example/` is a full playground: background/implementation chips, a control panel with every parameter (feeding scope-level settings, so the panes carry none), and cursor-follow glass with the reference's spring physics. Web measurement knobs: `?impl=full|fb`, `?bg=anim` (scrolling backdrop), `?auto` (self-driving glass); profile builds print frame timings every 120 frames.
+![Refraction and dispersion beside a frosted pane](doc/refraction.png)
+
+`example/` is a full playground: cursor-follow glass with the reference's spring physics, a hideable control panel with every parameter (feeding scope-level settings, so the panes carry none), background and render-mode switching, and an optional static pane with content for glass-on-glass. Web measurement knobs: `?impl=full|fb`, `?bg=anim` (scrolling backdrop), `?auto` (self-driving glass); profile builds print frame timings every 120 frames.
 
 ## Credits
 
