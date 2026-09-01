@@ -846,14 +846,20 @@ class _RawGlassScope extends SingleChildRenderObjectWidget {
 
   final bool useFallback;
 
+  // MediaQuery when available: unlike View.of, it notifies dependents when
+  // the DPR changes (e.g. the window moves to a different-density monitor).
+  static double _dprOf(BuildContext context) =>
+      MediaQuery.maybeDevicePixelRatioOf(context) ??
+      View.of(context).devicePixelRatio;
+
   @override
   RenderGlassScope createRenderObject(BuildContext context) =>
-      RenderGlassScope(View.of(context).devicePixelRatio, useFallback);
+      RenderGlassScope(_dprOf(context), useFallback);
 
   @override
   void updateRenderObject(BuildContext context, RenderGlassScope renderObject) {
     renderObject
-      .._setDevicePixelRatio(View.of(context).devicePixelRatio)
+      .._setDevicePixelRatio(_dprOf(context))
       .._setFallbackActive(useFallback);
   }
 }
