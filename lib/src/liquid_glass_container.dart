@@ -1141,11 +1141,32 @@ class RenderGlassScope extends RenderProxyBox {
   /// low-frequency, and fewer pixels mean a cheaper readback on CanvasKit.
   /// At radius <= 2 the blur is sub-pixel: the sharp texture is aliased
   /// instead of building (and reading back) a near-identical copy.
+  ///
+  /// LRU-capped: an animated blur radius over a static backdrop would
+  /// otherwise accumulate one texture per distinct radius until the next
+  /// backdrop change. The cap keeps every radius in concurrent use (bounded
+  /// by the container count); evicted images stay alive while recorded
+  /// pictures still reference them (dart:ui images are refcounted).
   ui.Image _blurredTexture(int radius) {
     final sharp = _sharpTexture(); // refreshes cache key, drops stale blurs
     if (radius <= 2) return sharp;
-    return _blurTexs[radius] ??= _blur(sharp, radius);
+    final cached = _blurTexs.remove(radius);
+    if (cached != null) {
+      _blurTexs[radius] = cached; // reinsert: most recently used last
+      return cached;
+    }
+    final img = _blur(sharp, radius);
+    _blurTexs[radius] = img;
+    final cap = math.max(8, _containers.length);
+    while (_blurTexs.length > cap) {
+      _blurTexs.remove(_blurTexs.keys.first)!.dispose();
+    }
+    return img;
   }
+
+  /// Number of cached blurred full-scope textures (see [_blurredTexture]).
+  @visibleForTesting
+  int get debugBlurTextureCount => _blurTexs.length;
 
   static ui.Image _blur(ui.Image src, int radius) {
     final ds = radius >= 12 ? 4.0 : (radius >= 4 ? 2.0 : 1.0);

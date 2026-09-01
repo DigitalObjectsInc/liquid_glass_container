@@ -698,6 +698,54 @@ void main() {
     );
   });
 
+  testWidgets('animated blur radius keeps the blur texture cache bounded', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    var radius = 5.0;
+    late StateSetter setRadius;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                const ColoredBox(color: Color(0xFFFFFFFF)),
+                Positioned(
+                  left: 100,
+                  top: 100,
+                  child: StatefulBuilder(
+                    builder: (context, setState) {
+                      setRadius = setState;
+                      return LiquidGlassContainer(
+                        width: 200,
+                        height: 200,
+                        settings: LiquidGlassSettings(blurRadius: radius),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    // static backdrop, changing radius: churn mode exits after the stable
+    // stretch and the shared full-scope blur cache takes over
+    for (var r = 5; r <= 60; r++) {
+      setRadius(() => radius = r.toDouble());
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    final scope = _scope(tester);
+    expect(scope.isChurning, isFalse);
+    expect(scope.debugBlurTextureCount, greaterThan(0));
+    expect(scope.debugBlurTextureCount, lessThanOrEqualTo(8));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('nested scopes assert in debug', (tester) async {
     await _setUp(tester);
     await tester.pumpWidget(
