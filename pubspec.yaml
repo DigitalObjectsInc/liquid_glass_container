@@ -13,6 +13,16 @@ topics:
   - ui
   - widget
 
+screenshots:
+  - description: >-
+      Liquid glass panes over a wallpaper — refraction, glare, backdrop blur,
+      and glass stacked on glass.
+    path: doc/hero.png
+  - description: >-
+      Crisp refraction with chromatic dispersion beside a frosted, tinted
+      pane.
+    path: doc/refraction.png
+
 environment:
   sdk: ^3.12.0
   flutter: ">=3.44.0"
