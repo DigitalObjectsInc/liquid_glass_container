@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import 'settings.dart';
@@ -615,11 +616,35 @@ class _GlassCaptureContext extends PaintingContext {
     }
     if (child.isRepaintBoundary) {
       // Inline the subtree instead of adopting its retained layer: keeps the
-      // capture self-contained and lets the hash see the actual content.
+      // capture self-contained and lets the hash see the actual content. The
+      // boundary is tracked so the scope's post-frame watcher can detect its
+      // independent repaints (which never mark the scope dirty).
+      _scope._boundaries.add(child);
       _hasher.addInt(36);
       _hasher.addDouble(offset.dx);
       _hasher.addDouble(offset.dy);
-      child.paint(this, offset);
+      // Effects a boundary applies through its composited layer
+      // (updateCompositedLayer) don't run when its paint is inlined; recreate
+      // the common ones. Null on the boundary's very first frame (it hasn't
+      // composited yet): painted plain, converged by the watcher next frame.
+      // ignore: invalid_use_of_protected_member
+      final boundaryLayer = child.layer;
+      if (boundaryLayer == null) _scope._sawUncomposited = true;
+      if (boundaryLayer is OpacityLayer) {
+        final alpha = boundaryLayer.alpha ?? 255;
+        _hasher.addInt(alpha);
+        canvas.saveLayer(null, Paint()..color = Color.fromARGB(alpha, 0, 0, 0));
+        child.paint(this, offset);
+        canvas.restore();
+      } else if (boundaryLayer is ImageFilterLayer &&
+          boundaryLayer.imageFilter != null) {
+        _hasher.addInt(identityHashCode(boundaryLayer.imageFilter));
+        canvas.saveLayer(null, Paint()..imageFilter = boundaryLayer.imageFilter);
+        child.paint(this, offset);
+        canvas.restore();
+      } else {
+        child.paint(this, offset);
+      }
       return;
     }
     super.paintChild(child, offset);
@@ -627,9 +652,14 @@ class _GlassCaptureContext extends PaintingContext {
 
   @override
   void appendLayer(Layer layer) {
-    // Unknown layer content (textures, platform views, custom layers) can't be
-    // hashed or re-recorded: fall back to recapturing every frame.
-    _hasher.poison();
+    // Unknown layer content (textures, platform views, custom layers) can't
+    // be hashed or re-recorded: such content is omitted from the capture
+    // (the live pass reclaims retained layers appended here) and the poison
+    // forces a recapture every frame. Annotated regions are pure metadata
+    // wrappers created fresh each paint — their content is painted through a
+    // child context of this one and hashes normally, so they are exempt
+    // (every AppBar pushes one for system chrome).
+    if (layer is! AnnotatedRegionLayer) _hasher.poison();
     super.appendLayer(layer);
   }
 
@@ -769,7 +799,11 @@ enum GlassRenderMode {
 /// The scope re-records the backdrop whenever the subtree repaints, but only
 /// re-rasterizes (and bumps [RenderGlassScope.generation]) when the recorded
 /// content actually changed — glass moving over a static backdrop reuses the
-/// previous capture.
+/// previous capture. Descendant repaint boundaries (viewports, list items,
+/// [RepaintBoundary]s) repaint without marking the scope dirty; the scope
+/// watches their retained layers after each frame and recaptures when one
+/// changed, so the refraction follows scrolling and boundary-isolated
+/// animations with at most one frame of latency.
 ///
 /// Scopes must not be nested (asserts in debug): panes sample the nearest
 /// scope, and an outer scope cannot capture through an inner one. Use a
@@ -918,6 +952,8 @@ class RenderGlassScope extends RenderProxyBox {
       _captureLayer?.dispose();
       _captureLayer = null;
       _hashValid = false;
+      _boundaries.clear();
+      _boundarySigs.clear();
     }
     // containers switch between direct draws and pushed layers
     for (final c in _containers) {
@@ -977,6 +1013,86 @@ class RenderGlassScope extends RenderProxyBox {
 
   /// Sequence source for [_GlassEntry.childSeq] (unhashable child content).
   int _frameSeq = 0;
+
+  // Descendant repaint boundaries are inlined into the capture, so their
+  // independent repaints never mark the scope dirty (a scrolling viewport,
+  // a list item's animation, a FadeTransition). The capture walk collects
+  // them here; after every frame [_checkBoundaries] compares a signature of
+  // each boundary's retained layer subtree and marks the scope dirty on any
+  // change, so the capture follows with one frame of latency.
+  final Set<RenderObject> _boundaries = {};
+  final Map<RenderObject, int> _boundarySigs = {};
+  bool _watcherArmed = false;
+
+  /// Set when the capture inlined a boundary that had not composited yet (its
+  /// layer was null, so a composited effect like opacity couldn't be applied);
+  /// the boundary composites later in the same frame, so one post-frame
+  /// recapture converges.
+  bool _sawUncomposited = false;
+
+  void _armBoundaryWatcher() {
+    if (_watcherArmed || _boundaries.isEmpty) return;
+    _watcherArmed = true;
+    SchedulerBinding.instance.addPostFrameCallback(_checkBoundaries);
+  }
+
+  void _checkBoundaries(Duration _) {
+    _watcherArmed = false;
+    if (!attached || _fallbackActive) {
+      _boundarySigs.clear();
+      return;
+    }
+    var changed = false;
+    final prev = Map<RenderObject, int>.of(_boundarySigs);
+    _boundarySigs.clear();
+    for (final b in _boundaries) {
+      if (!b.attached) continue; // its removal repainted a tracked ancestor
+      // ignore: invalid_use_of_protected_member
+      final sig = _layerSig(b.layer);
+      _boundarySigs[b] = sig;
+      final p = prev[b];
+      if (p != null && p != sig) changed = true;
+    }
+    // A no-op recapture (unchanged hash) costs a re-record, never a raster,
+    // so a false positive is cheap; a miss would leave the glass stale.
+    if (changed) markNeedsPaint();
+    _armBoundaryWatcher();
+  }
+
+  /// Identity-fold of a retained layer subtree: repaints replace picture
+  /// layers, composited-layer updates mutate [OpacityLayer.alpha] /
+  /// [ImageFilterLayer.imageFilter] in place, and both must invalidate.
+  /// (Texture and platform-view frames change nothing Dart-visible — those
+  /// stay outside the refraction, as documented.)
+  static int _layerSig(Layer? root) {
+    if (root == null) return 0;
+    final h = _FrameHasher();
+    void fold(Layer l) {
+      h.addInt(identityHashCode(l));
+      if (l is PictureLayer) {
+        h.addInt(identityHashCode(l.picture));
+        return;
+      }
+      if (l is OffsetLayer) {
+        h.addDouble(l.offset.dx);
+        h.addDouble(l.offset.dy);
+        if (l is OpacityLayer) {
+          h.addInt(l.alpha ?? -1);
+        } else if (l is ImageFilterLayer) {
+          h.addInt(identityHashCode(l.imageFilter));
+        }
+      }
+      if (l is ContainerLayer) {
+        for (Layer? c = l.firstChild; c != null; c = c.nextSibling) {
+          fold(c);
+        }
+      }
+    }
+
+    fold(root);
+    // both 30-bit lanes, exact within web-safe integer range
+    return h.a * 0x40000000 + h.b;
+  }
 
   /// Records each sampled pane's child into its entry (scope-logical
   /// coordinates), so upper panes composite the child along with the glass.
@@ -1207,6 +1323,8 @@ class RenderGlassScope extends RenderProxyBox {
 
     _capturing = true;
     _clearEntries();
+    _boundaries.clear();
+    _sawUncomposited = false;
     final OffsetLayer captureLayer = OffsetLayer();
     final hasher = _FrameHasher();
     final captureContext = _GlassCaptureContext(
@@ -1221,6 +1339,12 @@ class RenderGlassScope extends RenderProxyBox {
     captureContext.stopRecordingIfNeeded();
     _capturing = false;
     _recordChildren();
+    _armBoundaryWatcher();
+    if (_sawUncomposited) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (attached && !_fallbackActive) markNeedsPaint();
+      });
+    }
 
     final bool unchanged =
         _captureLayer != null &&
@@ -1265,6 +1389,8 @@ class RenderGlassScope extends RenderProxyBox {
     _dropTextures();
     _captureLayer?.dispose();
     _captureLayer = null;
+    _boundaries.clear();
+    _boundarySigs.clear();
     super.dispose();
   }
 }

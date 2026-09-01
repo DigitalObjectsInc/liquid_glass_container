@@ -16,6 +16,8 @@ Initial release.
 - `GlassRenderMode` (`auto` / `capture` / `backdropFilter`) with
   `renderModeOf`/`settingsOf` inherited lookups.
 - Hashed backdrop capture: zero per-frame rasterizations over a static
-  backdrop, per-container crops on animated backdrops.
+  backdrop, per-container crops on animated backdrops; descendant repaint
+  boundaries (scrolling lists, `FadeTransition`s) tracked via layer
+  signatures.
 - Glass-through-glass compositing for overlapping panes, children included.
 - BackdropFilter-based fallback on CanvasKit (dart2js) web builds.
