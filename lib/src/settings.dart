@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 /// The glass pane's outline: a superellipse-cornered rounded rectangle
 /// matching the shader's SDF.
 @immutable
-class GlassShape {
+final class GlassShape {
   /// Corners of [cornerRadius] logical px, clamped to half the pane's short
   /// side.
   const GlassShape.superellipse({
@@ -59,6 +59,7 @@ class GlassShape {
 
   @override
   bool operator ==(Object other) =>
+      identical(this, other) ||
       other is GlassShape &&
       other._corner == _corner &&
       other._relative == _relative &&
@@ -83,7 +84,7 @@ class GlassShape {
 /// Values use Flutter conventions: logical px, 0..1 fractions, radians,
 /// y-down offsets.
 @immutable
-class LiquidGlassSettings {
+final class LiquidGlassSettings {
   const LiquidGlassSettings({
     this.shape,
     this.thickness,
@@ -301,6 +302,7 @@ class LiquidGlassSettings {
 
   @override
   bool operator ==(Object other) =>
+      identical(this, other) ||
       other is LiquidGlassSettings &&
       other.shape == shape &&
       other.thickness == thickness &&
