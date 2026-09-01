@@ -82,7 +82,7 @@ Measured in Chrome CanvasKit, 1200×900, 5 panes, profile build: fallback ~18 ms
 
 ## Constraints
 
-- Containers must be descendants of the scope, with translation-only transforms between them (no rotation/scale of the pane itself).
+- Containers must be descendants of the scope, with translation-only transforms between them (no rotation/scale of the pane itself). Scopes must not be nested (asserts in debug).
 - Backdrops containing platform views, textures, custom layers, or `FragmentShader` paints disable capture reuse (the scope recaptures every repaint — correct, just less cheap).
 - A pane's `child` is visible through panes stacked on top of it, except child content drawn via platform views or textures (it can't be recorded into the composite, so it is omitted from the upper pane's refraction).
 - Known deviations from the reference: blur via Skia's `ImageFilter.blur` (same sigma = radius/3) instead of the two-pass shader; drop shadow is a gaussian approximation of the exponential falloff; edge blend is clip AA instead of an SDF smoothstep; RGBA8 intermediates vs RGBA16F.

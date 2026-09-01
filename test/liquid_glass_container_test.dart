@@ -584,4 +584,16 @@ void main() {
     expect(_scope(tester).hasBackdrop, isFalse);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('nested scopes assert in debug', (tester) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GlassBackdropScope(
+          child: GlassBackdropScope(child: Container()),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isFlutterError);
+  });
 }

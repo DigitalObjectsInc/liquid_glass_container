@@ -770,6 +770,10 @@ enum GlassRenderMode {
 /// re-rasterizes (and bumps [RenderGlassScope.generation]) when the recorded
 /// content actually changed — glass moving over a static backdrop reuses the
 /// previous capture.
+///
+/// Scopes must not be nested (asserts in debug): panes sample the nearest
+/// scope, and an outer scope cannot capture through an inner one. Use a
+/// single scope around the shared backdrop.
 class GlassBackdropScope extends StatelessWidget {
   const GlassBackdropScope({
     super.key,
@@ -871,6 +875,25 @@ class _RawGlassScope extends SingleChildRenderObjectWidget {
 /// normally interact with [GlassBackdropScope] only.
 class RenderGlassScope extends RenderProxyBox {
   RenderGlassScope(this._devicePixelRatio, this._fallbackActive);
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    assert(() {
+      for (RenderObject? node = parent; node != null; node = node.parent) {
+        if (node is RenderGlassScope) {
+          throw FlutterError(
+            'GlassBackdropScope cannot be nested inside another '
+            'GlassBackdropScope.\n'
+            'Glass panes sample the nearest scope, and an outer scope cannot '
+            'capture through an inner one. Use a single scope around the '
+            'shared backdrop.',
+          );
+        }
+      }
+      return true;
+    }());
+  }
 
   double _devicePixelRatio;
   double get devicePixelRatio => _devicePixelRatio;
