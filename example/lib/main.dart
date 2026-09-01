@@ -62,6 +62,8 @@ class _DemoPageState extends State<DemoPage>
   late final Ticker _ticker;
   DemoBackground _bg = DemoBackground.checkerboard;
   GlassRenderMode _mode = GlassRenderMode.auto;
+  bool _staticPane = false;
+  bool _panelVisible = true;
   Size _area = Size.zero;
   Timer? _autoTimer;
   int _autoStep = 0;
@@ -242,38 +244,38 @@ class _DemoPageState extends State<DemoPage>
                         const AnimatedCheckerboard()
                       else
                         CustomPaint(painter: CheckerboardPainter()),
-                      // center container first so tests can address it as .first
-                      for (final dir in const [
-                        Offset.zero,
-                        Offset(-240, 0),
-                        Offset(240, 0),
-                        Offset(0, -240),
-                        Offset(0, 240),
-                      ])
-                        Positioned(
-                          left: pos.dx + dir.dx - w / 2,
-                          top: pos.dy + dir.dy - h / 2,
+                      // painted below the cursor pane, so dragging the cursor
+                      // pane across it shows glass refracting glass
+                      if (_staticPane)
+                        const Align(
+                          alignment: Alignment(-0.6, -0.2),
                           child: LiquidGlassContainer(
-                            width: w,
-                            height: h,
-                            child: dir == Offset.zero
-                                ? const Text(
-                                    'Liquid Glass',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.w600,
-                                      shadows: [
-                                        Shadow(
-                                          color: Colors.black38,
-                                          blurRadius: 6,
-                                        ),
-                                      ],
-                                    ),
-                                  )
-                                : null,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: 32,
+                              vertical: 26,
+                            ),
+                            settings: LiquidGlassSettings(
+                              tint: Color(0x1AFFFFFF), // per-pane override
+                            ),
+                            child: Text(
+                              'Static pane\nfor glass on glass',
+                              textAlign: TextAlign.center,
+                              style: _paneTextStyle,
+                            ),
                           ),
                         ),
+                      Positioned(
+                        left: pos.dx - w / 2,
+                        top: pos.dy - h / 2,
+                        child: LiquidGlassContainer(
+                          width: w,
+                          height: h,
+                          child: const Text(
+                            'Liquid Glass',
+                            style: _paneTextStyle,
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -282,10 +284,19 @@ class _DemoPageState extends State<DemoPage>
           ),
           // outside the scope so the glass doesn't refract it
           _panel(),
+          _panelToggle(),
         ],
       ),
     );
   }
+
+  static const _paneTextStyle = TextStyle(
+    color: Colors.white,
+    fontSize: 18,
+    fontWeight: FontWeight.w600,
+    height: 1.4,
+    shadows: [Shadow(color: Colors.black38, blurRadius: 6)],
+  );
 
   static const _labelStyle = TextStyle(fontSize: 12);
 
@@ -301,14 +312,14 @@ class _DemoPageState extends State<DemoPage>
   ];
 
   Widget _section(String title) => Padding(
-    padding: const EdgeInsets.only(top: 10, bottom: 2),
+    padding: const EdgeInsets.only(top: 14, bottom: 4),
     child: Text(
-      title,
+      title.toUpperCase(),
       style: const TextStyle(
-        fontSize: 11,
-        fontWeight: FontWeight.w600,
-        color: Colors.black54,
-        letterSpacing: 0.4,
+        fontSize: 10.5,
+        fontWeight: FontWeight.w700,
+        color: Colors.black45,
+        letterSpacing: 0.8,
       ),
     ),
   );
@@ -347,29 +358,57 @@ class _DemoPageState extends State<DemoPage>
     ],
   );
 
-  Widget _check(String label, bool value, ValueChanged<bool> set) => Row(
-    children: [
-      Expanded(child: Text(label, style: _labelStyle)),
-      Checkbox(
-        value: value,
-        visualDensity: VisualDensity.compact,
-        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        onChanged: (v) => setState(() => set(v!)),
+  Widget _check(String label, bool value, ValueChanged<bool> set) => InkWell(
+    onTap: () => setState(() => set(!value)),
+    child: Row(
+      children: [
+        Expanded(child: Text(label, style: _labelStyle)),
+        Checkbox(
+          value: value,
+          visualDensity: VisualDensity.compact,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          onChanged: (v) => setState(() => set(v!)),
+        ),
+      ],
+    ),
+  );
+
+  /// Floating button to reopen the panel once hidden.
+  Widget _panelToggle() => Positioned(
+    top: 12,
+    right: 12,
+    child: IgnorePointer(
+      ignoring: _panelVisible,
+      child: AnimatedOpacity(
+        opacity: _panelVisible ? 0 : 1,
+        duration: const Duration(milliseconds: 200),
+        child: Material(
+          color: Colors.white.withValues(alpha: 0.96),
+          shape: const CircleBorder(),
+          elevation: 6,
+          child: IconButton(
+            icon: const Icon(Icons.tune, size: 20),
+            tooltip: 'Show controls',
+            onPressed: () => setState(() => _panelVisible = true),
+          ),
+        ),
       ),
-    ],
+    ),
   );
 
   Widget _panel() {
     final p = _p;
-    return Positioned(
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOutCubic,
       top: 12,
-      right: 12,
+      right: _panelVisible ? 12 : -324,
       bottom: 12,
       width: 300,
       child: Material(
-        color: Colors.white.withValues(alpha: 0.94),
-        elevation: 6,
-        borderRadius: BorderRadius.circular(12),
+        color: Colors.white.withValues(alpha: 0.96),
+        elevation: 8,
+        borderRadius: BorderRadius.circular(16),
         clipBehavior: Clip.antiAlias,
         child: SliderTheme(
           data: SliderThemeData(
@@ -378,11 +417,31 @@ class _DemoPageState extends State<DemoPage>
             thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
           ),
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+            padding: const EdgeInsets.fromLTRB(14, 8, 14, 14),
             children: [
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Controls',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.chevron_right, size: 20),
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Hide controls',
+                    onPressed: () => setState(() => _panelVisible = false),
+                  ),
+                ],
+              ),
               _section('Background'),
               Wrap(
                 spacing: 4,
+                runSpacing: 6,
                 children: [
                   for (final bg in DemoBackground.values)
                     ChoiceChip(
@@ -397,6 +456,7 @@ class _DemoPageState extends State<DemoPage>
               _section('Implementation'),
               Wrap(
                 spacing: 4,
+                runSpacing: 6,
                 children: [
                   for (final mode in GlassRenderMode.values)
                     ChoiceChip(
@@ -407,6 +467,11 @@ class _DemoPageState extends State<DemoPage>
                       onSelected: (_) => setState(() => _mode = mode),
                     ),
                 ],
+              ),
+              _check(
+                'Static pane (glass on glass)',
+                _staticPane,
+                (v) => _staticPane = v,
               ),
               _section('Size'),
               _slider('Width', p.width, 50, 400, (v) => p.width = v),
