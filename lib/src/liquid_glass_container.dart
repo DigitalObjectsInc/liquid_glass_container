@@ -824,17 +824,22 @@ class _RawGlassScope extends SingleChildRenderObjectWidget {
   @override
   void updateRenderObject(BuildContext context, RenderGlassScope renderObject) {
     renderObject
-      ..devicePixelRatio = View.of(context).devicePixelRatio
-      ..useFallback = useFallback;
+      .._setDevicePixelRatio(View.of(context).devicePixelRatio)
+      .._setFallbackActive(useFallback);
   }
 }
 
+/// Render object behind [GlassBackdropScope]: records the backdrop, detects
+/// content changes, rasterizes the shared textures, and coordinates
+/// glass-through-glass compositing. Exposed for tests and introspection
+/// (see [generation], [isChurning], [fallbackActive], [hasBackdrop]); apps
+/// normally interact with [GlassBackdropScope] only.
 class RenderGlassScope extends RenderProxyBox {
   RenderGlassScope(this._devicePixelRatio, this._fallbackActive);
 
   double _devicePixelRatio;
   double get devicePixelRatio => _devicePixelRatio;
-  set devicePixelRatio(double value) {
+  void _setDevicePixelRatio(double value) {
     if (value == _devicePixelRatio) return;
     _devicePixelRatio = value;
     markNeedsPaint();
@@ -845,7 +850,7 @@ class RenderGlassScope extends RenderProxyBox {
   /// Whether containers paint via the BackdropFilter fallback.
   bool get fallbackActive => _fallbackActive;
 
-  set useFallback(bool active) {
+  void _setFallbackActive(bool active) {
     if (active == _fallbackActive) return;
     _fallbackActive = active;
     if (active) {
@@ -870,7 +875,7 @@ class RenderGlassScope extends RenderProxyBox {
   /// True while the backdrop capture paint is running; containers skip
   /// painting so the capture holds only what's behind the glass (mirrors the
   /// reference's separate bg pass — no self-feedback, no frame lag).
-  bool capturing = false;
+  bool _capturing = false;
 
   /// Retained recording of the backdrop; containers rasterize only their own
   /// crop region from it via [captureRegion].
@@ -1049,7 +1054,7 @@ class RenderGlassScope extends RenderProxyBox {
   }
 
   /// Rasterizes the given region (scope device px) of the backdrop recording.
-  ui.Image captureRegion(Rect devicePxRect) => _captureLayer!.toImageSync(
+  ui.Image _captureRegion(Rect devicePxRect) => _captureLayer!.toImageSync(
     Rect.fromLTRB(
       devicePxRect.left / _devicePixelRatio,
       devicePxRect.top / _devicePixelRatio,
@@ -1060,7 +1065,7 @@ class RenderGlassScope extends RenderProxyBox {
   );
 
   /// Full-scope raster of the backdrop recording (device px).
-  ui.Image sharpTexture() {
+  ui.Image _sharpTexture() {
     if (_texGen != _generation || _texDpr != _devicePixelRatio) {
       _dropTextures();
       _sharpTex = _captureLayer!.toImageSync(
@@ -1078,8 +1083,8 @@ class RenderGlassScope extends RenderProxyBox {
   /// low-frequency, and fewer pixels mean a cheaper readback on CanvasKit.
   /// At radius <= 2 the blur is sub-pixel: the sharp texture is aliased
   /// instead of building (and reading back) a near-identical copy.
-  ui.Image blurredTexture(int radius) {
-    final sharp = sharpTexture(); // refreshes the cache key, drops stale blurs
+  ui.Image _blurredTexture(int radius) {
+    final sharp = _sharpTexture(); // refreshes cache key, drops stale blurs
     if (radius <= 2) return sharp;
     return _blurTexs[radius] ??= _blur(sharp, radius);
   }
@@ -1121,7 +1126,7 @@ class RenderGlassScope extends RenderProxyBox {
       return;
     }
 
-    capturing = true;
+    _capturing = true;
     _clearEntries();
     final OffsetLayer captureLayer = OffsetLayer();
     final hasher = _FrameHasher();
@@ -1135,7 +1140,7 @@ class RenderGlassScope extends RenderProxyBox {
     // Same pattern as the framework's SnapshotWidget.
     // ignore: invalid_use_of_protected_member
     captureContext.stopRecordingIfNeeded();
-    capturing = false;
+    _capturing = false;
     _recordChildren();
 
     final bool unchanged =
@@ -1319,6 +1324,11 @@ class LiquidGlassContainer extends SingleChildRenderObjectWidget {
   }
 }
 
+/// Render object behind [LiquidGlassContainer]: lays out like [Container]
+/// (explicit size ← wrap child + padding ← expand), hit-tests the glass
+/// outline, and paints the pane via the capture pipeline or the
+/// BackdropFilter fallback. Exposed for tests and introspection; apps
+/// normally use [LiquidGlassContainer].
 class RenderLiquidGlassContainer extends RenderBox
     with RenderObjectWithChildMixin<RenderBox> {
   RenderLiquidGlassContainer({
@@ -1588,7 +1598,7 @@ class RenderLiquidGlassContainer extends RenderBox
       return;
     }
     if (_fbClip.layer != null) _releaseFbLayers(); // left from a flag flip
-    if (scope.capturing || !scope.hasBackdrop) return;
+    if (scope._capturing || !scope.hasBackdrop) return;
 
     final dpr = scope.devicePixelRatio;
     final scopePx = Rect.fromLTWH(
@@ -1631,8 +1641,8 @@ class RenderLiquidGlassContainer extends RenderBox
       // position independent (sampling clamps at the scope edge, exactly
       // like the reference).
       _dropCropTextures();
-      sharp = scope.sharpTexture();
-      blurred = scope.blurredTexture(devBlur);
+      sharp = scope._sharpTexture();
+      blurred = scope._blurredTexture(devBlur);
       texRect = scopePx;
     }
 
@@ -1835,17 +1845,17 @@ class RenderLiquidGlassContainer extends RenderBox
     ).intersect(scopePx);
 
     if (lower.isEmpty) {
-      _sharp = scope.captureRegion(crop);
+      _sharp = scope._captureRegion(crop);
     } else {
       // Composite the lower panes' recorded output over the backdrop, in
       // scope-logical coordinates rasterized at device resolution.
       final ui.Image base;
       final bool ownsBase;
       if (scope.isChurning) {
-        base = scope.captureRegion(crop);
+        base = scope._captureRegion(crop);
         ownsBase = true;
       } else {
-        base = scope.sharpTexture();
+        base = scope._sharpTexture();
         ownsBase = false;
       }
       final rec = ui.PictureRecorder();
