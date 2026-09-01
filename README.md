@@ -23,7 +23,7 @@ GlassBackdropScope(
 )
 ```
 
-Optional: `await LiquidGlassContainer.precache()` before the first build to avoid a blank first frame.
+Optional: `await LiquidGlassContainer.precache()` before the first build to avoid a blank first frame (when calling it before `runApp`, call `WidgetsFlutterBinding.ensureInitialized()` first).
 
 ### Sizing
 

@@ -15,24 +15,53 @@ class _GlassShaders {
 
   static bool loaded = false;
 
+  /// Set when loading failed (reported once via [FlutterError.reportError]);
+  /// containers then paint their children without glass instead of retrying.
+  static bool failed = false;
+
   // Consumers address package shaders as packages/<pkg>/lib/... (the shaders
   // section keeps the full lib/ path, unlike images); when this package itself
   // is the root project (its own `flutter test`) the key is the raw lib/ path,
-  // hence the fallback.
-  static Future<ui.FragmentProgram> _load(String name) =>
-      ui.FragmentProgram.fromAsset(
+  // hence the fallback. If both fail, the packages/ error is the one relevant
+  // to consumers, so it is the one rethrown.
+  static Future<ui.FragmentProgram> _load(String name) async {
+    try {
+      return await ui.FragmentProgram.fromAsset(
         'packages/liquid_glass_container/lib/shaders/$name',
-      ).catchError((_) => ui.FragmentProgram.fromAsset('lib/shaders/$name'));
-
-  static Future<void> ensureLoaded() => _loading ??=
-      Future.wait([_load('glass_main.frag'), _load('glass_overlay.frag')]).then(
-        (ps) {
-          main = ps[0];
-          overlay = ps[1];
-          loaded = true;
-          _warmUp();
-        },
       );
+    } on Object catch (e, s) {
+      try {
+        return await ui.FragmentProgram.fromAsset('lib/shaders/$name');
+      } on Object {
+        Error.throwWithStackTrace(e, s);
+      }
+    }
+  }
+
+  /// Never completes with an error: a load failure is reported to
+  /// [FlutterError] and latched in [failed], so per-paint listeners don't
+  /// turn one failure into a stream of unhandled async errors.
+  static Future<void> ensureLoaded() => _loading ??=
+      Future.wait([_load('glass_main.frag'), _load('glass_overlay.frag')])
+          .then((ps) {
+            main = ps[0];
+            overlay = ps[1];
+            loaded = true;
+            _warmUp();
+          })
+          .catchError((Object e, StackTrace s) {
+            failed = true;
+            FlutterError.reportError(
+              FlutterErrorDetails(
+                exception: e,
+                stack: s,
+                library: 'liquid_glass_container',
+                context: ErrorDescription(
+                  'while loading the liquid glass shader programs',
+                ),
+              ),
+            );
+          });
 
   /// Draw 1px with each program so the GPU compiles/links them at load time
   /// rather than on the first interaction (WebGL compiles lazily on first use).
@@ -1251,7 +1280,11 @@ class LiquidGlassContainer extends SingleChildRenderObjectWidget {
     super.child,
   });
 
-  /// Optionally call before first build to avoid a blank first frame.
+  /// Optionally call before the first build to avoid a blank first frame
+  /// (before `runApp`, call `WidgetsFlutterBinding.ensureInitialized()`
+  /// first). Never completes with an error: a shader load failure is
+  /// reported to [FlutterError] and containers paint their children without
+  /// glass.
   static Future<void> precache() => _GlassShaders.ensureLoaded();
 
   /// Fixed pane size (logical px, constrained by the parent). Null: size to
@@ -1581,6 +1614,10 @@ class RenderLiquidGlassContainer extends RenderBox
   @override
   void paint(PaintingContext context, Offset offset) {
     if (!_GlassShaders.loaded) {
+      if (_GlassShaders.failed) {
+        _paintChild(context, offset); // shaders unavailable: content, no glass
+        return;
+      }
       _GlassShaders.ensureLoaded().then((_) {
         if (attached) markNeedsPaint();
       });
