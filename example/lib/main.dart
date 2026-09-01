@@ -22,17 +22,76 @@ class MyApp extends StatelessWidget {
 }
 
 enum DemoBackground {
+  grid('Grid', null),
   checkerboard('Checker', null),
   animated('Anim', null),
   tahoeLight('Tahoe', 'assets/bg-tahoe-light.webp'),
   tahoeDark('Tahoe dark', 'assets/bg-tahoe-dark.webp'),
-  buildings('Buildings', 'assets/bg-buildings.png'),
-  text('Text', 'assets/bg-text.jpg'),
-  grid('Grid', 'assets/bg-grid.png');
+  buildings('Buildings', 'assets/bg-buildings.png', aspect: 1154 / 816),
+  text('Text', 'assets/bg-text.jpg', mirror: false);
 
-  const DemoBackground(this.label, this.asset);
+  const DemoBackground(
+    this.label,
+    this.asset, {
+    this.aspect = 1,
+    this.mirror = true,
+  });
+
   final String label;
   final String? asset;
+
+  /// Intrinsic width / height, for fit-height tiling.
+  final double aspect;
+
+  /// Mirror alternate tiles (seamless for photos; off for text, which would
+  /// read backwards).
+  final bool mirror;
+}
+
+/// Fills the area height-first and tiles horizontally, mirroring alternate
+/// tiles so edges meet seamlessly. The demo wallpapers are square:
+/// [BoxFit.cover] would show only a heavily cropped horizontal slice on wide
+/// (especially ultrawide) screens.
+class MirrorTiledImage extends StatelessWidget {
+  const MirrorTiledImage({
+    super.key,
+    required this.asset,
+    this.aspect = 1,
+    this.mirror = true,
+  });
+
+  final String asset;
+  final double aspect; // intrinsic width / height
+  final bool mirror;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final h = constraints.maxHeight;
+      final tileW = h * aspect;
+      final n = math.max(1, (constraints.maxWidth / tileW).ceil());
+      return ClipRect(
+        child: OverflowBox(
+          maxWidth: double.infinity,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < n; i++)
+                Transform.flip(
+                  flipX: mirror && i.isOdd,
+                  child: Image.asset(
+                    asset,
+                    width: tileW,
+                    height: h,
+                    fit: BoxFit.fill,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
 }
 
 String _modeLabel(GlassRenderMode mode) => switch (mode) {
@@ -60,7 +119,7 @@ class _DemoPageState extends State<DemoPage>
 
   final _GlassParams _p = _GlassParams();
   late final Ticker _ticker;
-  DemoBackground _bg = DemoBackground.checkerboard;
+  DemoBackground _bg = DemoBackground.grid;
   GlassRenderMode _mode = GlassRenderMode.auto;
   bool _staticPane = false;
   bool _panelVisible = true;
@@ -239,9 +298,15 @@ class _DemoPageState extends State<DemoPage>
                     fit: StackFit.expand,
                     children: [
                       if (_bg.asset case final asset?)
-                        Image.asset(asset, fit: BoxFit.cover)
+                        MirrorTiledImage(
+                          asset: asset,
+                          aspect: _bg.aspect,
+                          mirror: _bg.mirror,
+                        )
                       else if (_bg == DemoBackground.animated)
                         const AnimatedCheckerboard()
+                      else if (_bg == DemoBackground.grid)
+                        CustomPaint(painter: GridPainter())
                       else
                         CustomPaint(painter: CheckerboardPainter()),
                       // painted below the cursor pane, so dragging the cursor
@@ -678,6 +743,41 @@ class CheckerboardPainter extends CustomPainter {
   @override
   bool shouldRepaint(CheckerboardPainter oldDelegate) =>
       oldDelegate.phase != phase;
+}
+
+/// Graph-paper line grid: white ground, light lines every 20 logical px,
+/// a stronger line every fifth. Lines make refraction displacement obvious.
+class GridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(Offset.zero & size, Paint()..color = Colors.white);
+    const cell = 20.0;
+    final minor = Paint()
+      ..color = const Color(0xFFE4E4E4)
+      ..strokeWidth = 1;
+    final major = Paint()
+      ..color = const Color(0xFFBDBDBD)
+      ..strokeWidth = 1;
+    for (var i = 0; i * cell <= size.width; i++) {
+      final x = i * cell;
+      canvas.drawLine(
+        Offset(x, 0),
+        Offset(x, size.height),
+        i % 5 == 0 ? major : minor,
+      );
+    }
+    for (var i = 0; i * cell <= size.height; i++) {
+      final y = i * cell;
+      canvas.drawLine(
+        Offset(0, y),
+        Offset(size.width, y),
+        i % 5 == 0 ? major : minor,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(GridPainter oldDelegate) => false;
 }
 
 /// Checkerboard scrolling 40 logical px/s: forces a backdrop content change
