@@ -585,6 +585,119 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('dry layout and intrinsics match Container semantics', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: _CheckerboardPainter()),
+                const Center(
+                  child: LiquidGlassContainer(
+                    padding: EdgeInsets.all(20),
+                    child: SizedBox(width: 100, height: 50),
+                  ),
+                ),
+                const Positioned(
+                  left: 0,
+                  top: 0,
+                  child: LiquidGlassContainer(width: 300, height: 200),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final panes = tester
+        .renderObjectList<RenderLiquidGlassContainer>(
+          find.byType(LiquidGlassContainer),
+        )
+        .toList();
+    final wrapping = panes[0];
+    final fixed = panes[1];
+
+    // dry layout mirrors performLayout
+    const loose = BoxConstraints(maxWidth: 600, maxHeight: 600);
+    expect(wrapping.getDryLayout(loose), const Size(140, 90));
+    expect(wrapping.getDryLayout(loose), wrapping.size);
+    expect(fixed.getDryLayout(loose), const Size(300, 200));
+
+    // intrinsics: child + padding, or the explicit dimension
+    expect(wrapping.getMinIntrinsicWidth(double.infinity), 140);
+    expect(wrapping.getMaxIntrinsicWidth(double.infinity), 140);
+    expect(wrapping.getMinIntrinsicHeight(double.infinity), 90);
+    expect(wrapping.getMaxIntrinsicHeight(double.infinity), 90);
+    expect(fixed.getMinIntrinsicWidth(double.infinity), 300);
+    expect(fixed.getMaxIntrinsicHeight(double.infinity), 200);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('pane participates in IntrinsicHeight and baseline rows', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: _CheckerboardPainter()),
+                Center(
+                  child: IntrinsicHeight(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        SizedBox(width: 40, height: 30),
+                        LiquidGlassContainer(
+                          padding: EdgeInsets.all(10),
+                          child: SizedBox(width: 20, height: 60),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  bottom: 0,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Text('A', style: TextStyle(fontSize: 20)),
+                      LiquidGlassContainer(
+                        padding: EdgeInsets.all(12),
+                        child: Text('B', style: TextStyle(fontSize: 20)),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    // IntrinsicHeight sizes to the pane's intrinsic height (60 + 20 padding)
+    expect(tester.getSize(find.byType(IntrinsicHeight)).height, 80);
+    // baseline row: glass text's on-screen baseline matches its sibling's
+    expect(
+      tester.getTopLeft(find.text('B')).dy,
+      tester.getTopLeft(find.text('A')).dy,
+    );
+  });
+
   testWidgets('nested scopes assert in debug', (tester) async {
     await _setUp(tester);
     await tester.pumpWidget(

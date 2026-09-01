@@ -1512,40 +1512,110 @@ class RenderLiquidGlassContainer extends RenderBox
     _texGen = -1;
   }
 
-  @override
-  void performLayout() {
-    // Container semantics: explicit dims win; else wrap child + padding;
-    // else expand to bounded constraints.
-    final c = _width != null || _height != null
-        ? constraints.tighten(width: _width, height: _height)
-        : constraints;
-    final ch = child;
-    if (ch == null) {
-      size = c.constrain(
-        Size(
-          _width ?? (c.hasBoundedWidth ? c.maxWidth : 0),
-          _height ?? (c.hasBoundedHeight ? c.maxHeight : 0),
-        ),
-      );
-      return;
-    }
-    ch.layout(c.deflate(_padding).loosen(), parentUsesSize: true);
-    size = c.constrain(
-      Size(
-        _width ?? ch.size.width + _padding.horizontal,
-        _height ?? ch.size.height + _padding.vertical,
-      ),
-    );
+  // Container semantics: explicit dims win; else wrap child + padding; else
+  // expand to bounded constraints. Layout is pure, so dry layout, dry
+  // baseline, and performLayout share these helpers.
+
+  BoxConstraints _tightenFor(BoxConstraints constraints) =>
+      _width != null || _height != null
+      ? constraints.tighten(width: _width, height: _height)
+      : constraints;
+
+  /// Pane size for already-[_tightenFor]ed constraints; [childSize] null when
+  /// childless.
+  Size _paneSizeFor(BoxConstraints c, Size? childSize) => c.constrain(
+    childSize == null
+        ? Size(
+            _width ?? (c.hasBoundedWidth ? c.maxWidth : 0),
+            _height ?? (c.hasBoundedHeight ? c.maxHeight : 0),
+          )
+        : Size(
+            _width ?? childSize.width + _padding.horizontal,
+            _height ?? childSize.height + _padding.vertical,
+          ),
+  );
+
+  /// [child]'s top-left within a pane of [paneSize].
+  Offset _childOffsetFor(Size paneSize, Size childSize) {
     final content = Rect.fromLTRB(
       _padding.left,
       _padding.top,
-      size.width - _padding.right,
-      size.height - _padding.bottom,
+      paneSize.width - _padding.right,
+      paneSize.height - _padding.bottom,
     );
-    (ch.parentData! as BoxParentData).offset = _alignment
-        .inscribe(ch.size, content)
-        .topLeft;
+    return _alignment.inscribe(childSize, content).topLeft;
   }
+
+  @override
+  void performLayout() {
+    final c = _tightenFor(constraints);
+    final ch = child;
+    if (ch == null) {
+      size = _paneSizeFor(c, null);
+      return;
+    }
+    ch.layout(c.deflate(_padding).loosen(), parentUsesSize: true);
+    size = _paneSizeFor(c, ch.size);
+    (ch.parentData! as BoxParentData).offset = _childOffsetFor(size, ch.size);
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final c = _tightenFor(constraints);
+    return _paneSizeFor(c, child?.getDryLayout(c.deflate(_padding).loosen()));
+  }
+
+  @override
+  double? computeDryBaseline(BoxConstraints constraints, TextBaseline baseline) {
+    final ch = child;
+    if (ch == null) return null;
+    final c = _tightenFor(constraints);
+    final cc = c.deflate(_padding).loosen();
+    final d = ch.getDryBaseline(cc, baseline);
+    if (d == null) return null;
+    final childSize = ch.getDryLayout(cc);
+    return d + _childOffsetFor(_paneSizeFor(c, childSize), childSize).dy;
+  }
+
+  @override
+  double? computeDistanceToActualBaseline(TextBaseline baseline) {
+    final ch = child;
+    if (ch == null) return null;
+    final d = ch.getDistanceToActualBaseline(baseline);
+    return d == null ? null : d + (ch.parentData! as BoxParentData).offset.dy;
+  }
+
+  double _intrinsicWidth(double height, double Function(RenderBox, double) f) {
+    if (_width != null) return _width!;
+    final ch = child;
+    if (ch == null) return 0;
+    final h = math.max(0.0, (_height ?? height) - _padding.vertical);
+    return f(ch, h) + _padding.horizontal;
+  }
+
+  double _intrinsicHeight(double width, double Function(RenderBox, double) f) {
+    if (_height != null) return _height!;
+    final ch = child;
+    if (ch == null) return 0;
+    final w = math.max(0.0, (_width ?? width) - _padding.horizontal);
+    return f(ch, w) + _padding.vertical;
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) =>
+      _intrinsicWidth(height, (c, h) => c.getMinIntrinsicWidth(h));
+
+  @override
+  double computeMaxIntrinsicWidth(double height) =>
+      _intrinsicWidth(height, (c, h) => c.getMaxIntrinsicWidth(h));
+
+  @override
+  double computeMinIntrinsicHeight(double width) =>
+      _intrinsicHeight(width, (c, w) => c.getMinIntrinsicHeight(w));
+
+  @override
+  double computeMaxIntrinsicHeight(double width) =>
+      _intrinsicHeight(width, (c, w) => c.getMaxIntrinsicHeight(w));
 
   @override
   bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {

@@ -10,7 +10,8 @@ Initial release.
   (defaults ← scope ← container), with `copyWith`/`merge`/`lerp`.
 - `GlassShape`: superellipse / relative / capsule / circle / rect outlines.
 - `Container`-style sizing (wrap child + padding, expand childless), with
-  `padding`, `alignment`, and `clipBehavior`; pane hit-tests its exact shape.
+  `padding`, `alignment`, and `clipBehavior`; intrinsics, dry layout, and
+  baselines included; pane hit-tests its exact shape.
 - `AnimatedLiquidGlassContainer`: implicit animation of size and settings.
 - `GlassRenderMode` (`auto` / `capture` / `backdropFilter`) with
   `renderModeOf`/`settingsOf` inherited lookups.
