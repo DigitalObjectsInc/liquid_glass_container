@@ -4,8 +4,8 @@ description: >-
   glare, backdrop blur and shadow. Fast single-pass shader, all platforms
   including web.
 version: 0.1.0
-repository: https://github.com/mertcanbs/liquid_glass_container
-issue_tracker: https://github.com/mertcanbs/liquid_glass_container/issues
+repository: https://github.com/DigitalObjectsInc/liquid_glass_container
+issue_tracker: https://github.com/DigitalObjectsInc/liquid_glass_container/issues
 topics:
   - liquid-glass
   - glassmorphism
@@ -15,7 +15,7 @@ topics:
 
 screenshots:
   - description: >-
-      Liquid glass panes over a wallpaper — refraction, glare, backdrop blur,
+      Liquid glass panes over a wallpaper: refraction, glare, backdrop blur,
       and glass stacked on glass.
     path: doc/hero.png
   - description: >-
