@@ -1151,11 +1151,9 @@ class RenderGlassScope extends RenderProxyBox {
   // composites the lower panes' recorded output into its backdrop textures.
   final List<_GlassEntry> _entries = [];
   final Map<RenderLiquidGlassContainer, int> _entryIndex = {};
-  List<int> _prevGlassStates = const [];
 
-  /// Bumped whenever any glass container's geometry or parameters change;
-  /// composite textures (which bake lower panes' output) are keyed on it.
-  int _glassEpoch = 0;
+  /// Last frame's glass states; a change schedules the stale-pane check.
+  List<int> _prevGlassStates = const [];
 
   /// Sequence source for [_GlassEntry.childSeq] (unhashable child content).
   int _frameSeq = 0;
@@ -1515,19 +1513,55 @@ class RenderGlassScope extends RenderProxyBox {
     _hashB = hasher.b;
     _hashValid = !hasher.poisoned;
 
-    // any glass geometry/param/child-content change invalidates composited
-    // textures
+    // any glass geometry/param/child-content change schedules the stale-pane
+    // check (panes key their composite crops on these states themselves)
     final states = [
       for (final e in _entries)
         Object.hash(e.stateHash, e.childHashA, e.childHashB, e.childSeq),
     ];
-    if (!listEquals(states, _prevGlassStates)) {
-      _glassEpoch++;
-      _prevGlassStates = states;
+    final epochChanged = !listEquals(states, _prevGlassStates);
+    if (epochChanged) _prevGlassStates = states;
+
+    // Panes inside a clean repaint boundary do not repaint with the scope;
+    // after a generation or epoch change, mark the ones whose last paint
+    // predates it (checked post-frame, when this frame's paints are done).
+    if ((!unchanged || epochChanged) && !_stalePaneCheckScheduled) {
+      _stalePaneCheckScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback(_markStalePanes);
     }
 
     super.paint(context, offset);
   }
+
+  bool _stalePaneCheckScheduled = false;
+
+  void _markStalePanes(Duration _) {
+    _stalePaneCheckScheduled = false;
+    if (!attached || _fallbackActive) return;
+    for (final c in _containers) {
+      if (!c.attached) continue;
+      if (c._lastPaintedGen != _generation) {
+        c.markNeedsPaint();
+        continue;
+      }
+      final e = _entryOf(c);
+      if (e == null) continue; // not registered this frame (culled)
+      // only this pane's own geometry/params or its lower set can make its
+      // painted output stale; unrelated panes must not cause repaints
+      if (e.stateHash != c._lastPaintedOwnState ||
+          _lowerStatesHash(_lowerIntersecting(c)) != c._lastPaintedLowerHash) {
+        c.markNeedsPaint();
+      }
+    }
+  }
+
+  /// Combined state of the lower panes whose output a pane composites.
+  static int _lowerStatesHash(List<_GlassEntry> lower) => lower.isEmpty
+      ? 0
+      : Object.hashAll([
+          for (final e in lower)
+            Object.hash(e.stateHash, e.childHashA, e.childHashB, e.childSeq),
+        ]);
 
   @override
   void dispose() {
@@ -1761,7 +1795,19 @@ class RenderLiquidGlassContainer extends RenderBox
   int _texRadius = -1;
   double _texDpr = 0;
   int _texKind = -1; // 0 = backdrop only, 1 = composited with lower glass
-  int _texEpoch = -1;
+  int _texLowerHash = 0;
+
+  /// Stamps of the scope state this pane last painted with; the scope marks
+  /// panes whose stamps lag (they sit inside a clean repaint boundary and do
+  /// not repaint with the scope). Own state and lower-set state are stamped
+  /// separately, so an unrelated pane's movement does not mark this one.
+  int _lastPaintedGen = -1;
+  int _lastPaintedOwnState = 0;
+  int _lastPaintedLowerHash = 0;
+
+  /// Crop texture rebuilds, for tests (debug builds only).
+  @visibleForTesting
+  static int debugCropTextureBuilds = 0;
 
   // Second shader instance for the recorded-output picture: its uniforms
   // differ from the scene draw's within the same frame.
@@ -2042,6 +2088,14 @@ class RenderLiquidGlassContainer extends RenderBox
     final toScope = getTransformTo(scope);
     final originScope = MatrixUtils.transformPoint(toScope, Offset.zero) * dpr;
     final glassPx = originScope & size * dpr;
+    final entry = scope._entryOf(this);
+    final lower = scope._lowerIntersecting(this);
+    final lowerHash = RenderGlassScope._lowerStatesHash(lower);
+    // Stamps for the post-frame stale-pane check, taken from the registry so
+    // the later comparison uses the same source.
+    _lastPaintedGen = scope.generation;
+    _lastPaintedOwnState = entry?.stateHash ?? 0;
+    _lastPaintedLowerHash = lowerHash;
     if (!glassPx.overlaps(scopePx)) return;
 
     // Sampled area (glass + refraction/dispersion/blur reach); lower panes
@@ -2049,7 +2103,6 @@ class RenderLiquidGlassContainer extends RenderBox
     final needed = glassPx
         .inflate(_reachFor(_settings, dpr).ceilToDouble())
         .intersect(scopePx);
-    final lower = scope._lowerIntersecting(this);
     // texture cache and shader blur operate in integer device px
     final devBlur = (_settings.blurRadius! * dpr).round();
 
@@ -2061,7 +2114,7 @@ class RenderLiquidGlassContainer extends RenderBox
       // lower panes' recorded output over the backdrop (so this pane refracts
       // them); on an animated backdrop a crop is also far less readback data
       // per frame than the full scope.
-      _ensureCropTextures(scope, needed, scopePx, lower, devBlur);
+      _ensureCropTextures(scope, needed, scopePx, lower, lowerHash, devBlur);
       sharp = _sharp!;
       blurred = _blurred!;
       texRect = _texCrop!;
@@ -2092,7 +2145,6 @@ class RenderLiquidGlassContainer extends RenderBox
 
     // If a later pane samples this one, record the same output (in scope
     // coordinates) so it can be composited into that pane's backdrop.
-    final entry = scope._entryOf(this);
     if (entry != null && scope._needsPicture(this)) {
       final originLogical = originScope / dpr;
       final ps = _compShader ??= _GlassShaders.main.fragmentShader();
@@ -2246,6 +2298,10 @@ class RenderLiquidGlassContainer extends RenderBox
     Rect needed,
     Rect scopePx,
     List<_GlassEntry> lower,
+    // Composites are keyed on the lower panes' own states, not the global
+    // glass epoch: this pane's movement must not rebuild a crop whose
+    // content (backdrop plus lower output) did not change.
+    int lowerHash,
     int radius, // blur radius, device px
   ) {
     final dpr = scope.devicePixelRatio;
@@ -2254,7 +2310,7 @@ class RenderLiquidGlassContainer extends RenderBox
         _texDpr == dpr &&
         _texRadius == radius &&
         _texKind == kind &&
-        (kind == 0 || _texEpoch == scope._glassEpoch) &&
+        _texLowerHash == lowerHash &&
         _texCrop != null &&
         _texCrop!.left <= needed.left &&
         _texCrop!.top <= needed.top &&
@@ -2262,6 +2318,10 @@ class RenderLiquidGlassContainer extends RenderBox
         _texCrop!.bottom >= needed.bottom) {
       return;
     }
+    assert(() {
+      debugCropTextureBuilds++;
+      return true;
+    }());
     _dropCropTextures();
     // Snapped out to a grid so small movements keep hitting the cache. Where
     // the crop is clipped by the scope edge, clamp-to-edge sampling matches
@@ -2322,7 +2382,7 @@ class RenderLiquidGlassContainer extends RenderBox
     _texRadius = radius;
     _texDpr = dpr;
     _texKind = kind;
-    _texEpoch = scope._glassEpoch;
+    _texLowerHash = lowerHash;
   }
 
   // ---- CanvasKit fallback: BackdropFilter pipeline, no capture/readbacks ----

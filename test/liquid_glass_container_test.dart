@@ -1043,6 +1043,61 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('pane inside a clean boundary follows backdrop changes', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    var color = const Color(0xFFFFFFFF);
+    late StateSetter setColor;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  StatefulBuilder(
+                    builder: (context, setState) {
+                      setColor = setState;
+                      return ColoredBox(color: color);
+                    },
+                  ),
+                  const Positioned(
+                    left: 100,
+                    top: 100,
+                    child: RepaintBoundary(
+                      child: LiquidGlassContainer(width: 200, height: 200),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    setColor(() => color = const Color(0xFF000000));
+    await tester.pump(); // scope recaptures, pane's boundary is clean
+    await tester.pump(); // post-frame check marks the stale pane
+    await tester.pump(); // pane repaints with the new texture
+
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byType(RepaintBoundary).first,
+    );
+    final image = await tester.runAsync(() => boundary.toImage());
+    final data = await tester.runAsync(
+      () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
+    );
+    int lum(int x, int y) => data!.getUint8((y * image!.width + x) * 4);
+    // the glass interior must show the new black, not stale white
+    expect(lum(200, 200), lessThan(50));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('in-place path mutation invalidates the capture', (tester) async {
     await _setUp(tester);
     final path = Path()..addRect(const Rect.fromLTWH(100, 100, 100, 100));
@@ -1186,6 +1241,58 @@ void main() {
     // interior over white stays white; a NaN ring would corrupt the fringe
     expect(lum(200, 200), greaterThan(200));
     expect(lum(102, 200), greaterThan(150)); // just inside the left edge
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('upper pane movement reuses the composite crop', (tester) async {
+    await _setUp(tester);
+    var upperLeft = 220.0;
+    late StateSetter setUpperLeft;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                const ColoredBox(color: Color(0xFFFFFFFF)),
+                const Positioned(
+                  left: 100,
+                  top: 100,
+                  child: LiquidGlassContainer(width: 200, height: 200),
+                ),
+                StatefulBuilder(
+                  builder: (context, setState) {
+                    setUpperLeft = setState;
+                    return Positioned(
+                      left: upperLeft,
+                      top: 140,
+                      child: const LiquidGlassContainer(
+                        width: 200,
+                        height: 200,
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    RenderLiquidGlassContainer.debugCropTextureBuilds = 0;
+    for (var i = 1; i <= 5; i++) {
+      setUpperLeft(() => upperLeft = 220.0 + i * 2);
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    // the crop content (backdrop + lower pane) did not change: the upper
+    // pane's own movement must not rebuild it (1 allowed for a grid cross)
+    expect(
+      RenderLiquidGlassContainer.debugCropTextureBuilds,
+      lessThanOrEqualTo(1),
+    );
     expect(tester.takeException(), isNull);
   });
 
