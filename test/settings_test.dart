@@ -14,11 +14,15 @@ void main() {
 
     test('resolveRadius: relative / capsule / circle / rect', () {
       expect(
-        const GlassShape.relative(cornerFactor: 0.5)
-            .resolveRadius(const Size(200, 100)),
+        const GlassShape.relative(
+          cornerFactor: 0.5,
+        ).resolveRadius(const Size(200, 100)),
         25,
       );
-      expect(const GlassShape.capsule().resolveRadius(const Size(200, 100)), 50);
+      expect(
+        const GlassShape.capsule().resolveRadius(const Size(200, 100)),
+        50,
+      );
       expect(const GlassShape.circle().resolveRadius(const Size(80, 80)), 40);
       expect(const GlassShape.rect().resolveRadius(const Size(200, 100)), 0);
       expect(const GlassShape.circle().roundness, 2);
@@ -127,6 +131,46 @@ void main() {
       expect(a, b);
       expect(a.hashCode, b.hashCode);
       expect(a, isNot(const LiquidGlassSettings(thickness: 10)));
+    });
+
+    test('isResolved', () {
+      expect(LiquidGlassSettings.defaults.isResolved, isTrue);
+      expect(const LiquidGlassSettings(thickness: 10).isResolved, isFalse);
+      expect(
+        LiquidGlassSettings.defaults
+            .merge(const LiquidGlassSettings(blurRadius: 3))
+            .isResolved,
+        isTrue,
+      );
+    });
+
+    test('constructor asserts reject out-of-range values', () {
+      expect(() => LiquidGlassSettings(thickness: -1), throwsAssertionError);
+      expect(
+        () => LiquidGlassSettings(indexOfRefraction: 0.5),
+        throwsAssertionError,
+      );
+      expect(() => LiquidGlassSettings(blurRadius: -2), throwsAssertionError);
+    });
+
+    test('toString lists only the set fields', () {
+      const s = LiquidGlassSettings(thickness: 10, blurEdge: false);
+      expect('$s', contains('thickness: 10'));
+      expect('$s', contains('blurEdge: false'));
+      expect('$s', isNot(contains('glare')));
+      expect(
+        '${const GlassShape.relative(cornerFactor: 0.5)}',
+        contains('cornerFactor: 0.5'),
+      );
+    });
+
+    test('GlassShape exposes its corner value', () {
+      const abs = GlassShape.superellipse(cornerRadius: 12);
+      expect(abs.cornerRadius, 12);
+      expect(abs.cornerFactor, isNull);
+      const rel = GlassShape.relative(cornerFactor: 0.4);
+      expect(rel.cornerFactor, 0.4);
+      expect(rel.cornerRadius, isNull);
     });
   });
 }

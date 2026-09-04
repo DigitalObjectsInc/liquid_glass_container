@@ -22,7 +22,9 @@ final class GlassShape {
       _relative = true;
 
   /// Fully rounded short sides (stadium / pill).
-  const GlassShape.capsule({this.roundness = 5}) : _corner = 1, _relative = true;
+  const GlassShape.capsule({this.roundness = 5})
+    : _corner = 1,
+      _relative = true;
 
   /// Circular corners at maximum radius — a circle when the pane is square.
   const GlassShape.circle() : _corner = 1, _relative = true, roundness = 2;
@@ -37,6 +39,13 @@ final class GlassShape {
 
   /// Superellipse corner exponent, 2 (circular) .. 7 (squircle).
   final double roundness;
+
+  /// The fixed corner radius in logical px, or null for a relative shape.
+  double? get cornerRadius => _relative ? null : _corner;
+
+  /// The corner factor (fraction of half the pane's short side), or null for
+  /// a fixed-radius shape.
+  double? get cornerFactor => _relative ? _corner : null;
 
   /// Corner radius in logical px for a pane of [size].
   double resolveRadius(Size size) {
@@ -61,12 +70,18 @@ final class GlassShape {
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is GlassShape &&
-      other._corner == _corner &&
-      other._relative == _relative &&
-      other.roundness == roundness;
+          other._corner == _corner &&
+          other._relative == _relative &&
+          other.roundness == roundness;
 
   @override
   int get hashCode => Object.hash(_corner, _relative, roundness);
+
+  @override
+  String toString() => _relative
+      ? 'GlassShape.relative(cornerFactor: $_corner, roundness: $roundness)'
+      : 'GlassShape.superellipse(cornerRadius: $_corner, '
+            'roundness: $roundness)';
 }
 
 /// Visual settings for liquid glass panes.
@@ -105,7 +120,11 @@ final class LiquidGlassSettings {
     this.shadowBlur,
     this.shadowIntensity,
     this.shadowOffset,
-  });
+  }) : assert(thickness == null || thickness >= 0),
+       assert(indexOfRefraction == null || indexOfRefraction >= 1),
+       assert(dispersion == null || dispersion >= 0),
+       assert(blurRadius == null || blurRadius >= 0),
+       assert(shadowBlur == null || shadowBlur >= 0);
 
   /// Package defaults (the reference's control-panel defaults); every field
   /// non-null. Unset fields resolve here after scope and container merging.
@@ -171,8 +190,8 @@ final class LiquidGlassSettings {
   /// Glare highlight angle in radians. Default -π/4.
   final double? glareAngle;
 
-  /// Backdrop blur radius in logical px, 0..100. Default 1 (off below ~1
-  /// device px). Sub-(device)pixel radii skip the blur pass entirely.
+  /// Backdrop blur radius in logical px, 0..100. Default 1: effectively off,
+  /// because the blur pass runs only above 2 device px.
   final double? blurRadius;
 
   /// Whether the blur reaches into the refraction band. Default true.
@@ -190,6 +209,29 @@ final class LiquidGlassSettings {
 
   /// Shadow offset, y-down logical px. Default Offset(0, 10).
   final Offset? shadowOffset;
+
+  /// True when every field is non-null (fully resolved, nothing left to
+  /// inherit). [defaults] resolves any settings: `defaults.merge(s)`.
+  bool get isResolved =>
+      shape != null &&
+      thickness != null &&
+      indexOfRefraction != null &&
+      dispersion != null &&
+      fresnelRange != null &&
+      fresnelHardness != null &&
+      fresnelIntensity != null &&
+      glareRange != null &&
+      glareHardness != null &&
+      glareIntensity != null &&
+      glareConvergence != null &&
+      glareOppositeIntensity != null &&
+      glareAngle != null &&
+      blurRadius != null &&
+      blurEdge != null &&
+      tint != null &&
+      shadowBlur != null &&
+      shadowIntensity != null &&
+      shadowOffset != null;
 
   /// This with [other]'s non-null fields on top.
   LiquidGlassSettings merge(LiquidGlassSettings? other) {
@@ -304,25 +346,25 @@ final class LiquidGlassSettings {
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is LiquidGlassSettings &&
-      other.shape == shape &&
-      other.thickness == thickness &&
-      other.indexOfRefraction == indexOfRefraction &&
-      other.dispersion == dispersion &&
-      other.fresnelRange == fresnelRange &&
-      other.fresnelHardness == fresnelHardness &&
-      other.fresnelIntensity == fresnelIntensity &&
-      other.glareRange == glareRange &&
-      other.glareHardness == glareHardness &&
-      other.glareIntensity == glareIntensity &&
-      other.glareConvergence == glareConvergence &&
-      other.glareOppositeIntensity == glareOppositeIntensity &&
-      other.glareAngle == glareAngle &&
-      other.blurRadius == blurRadius &&
-      other.blurEdge == blurEdge &&
-      other.tint == tint &&
-      other.shadowBlur == shadowBlur &&
-      other.shadowIntensity == shadowIntensity &&
-      other.shadowOffset == shadowOffset;
+          other.shape == shape &&
+          other.thickness == thickness &&
+          other.indexOfRefraction == indexOfRefraction &&
+          other.dispersion == dispersion &&
+          other.fresnelRange == fresnelRange &&
+          other.fresnelHardness == fresnelHardness &&
+          other.fresnelIntensity == fresnelIntensity &&
+          other.glareRange == glareRange &&
+          other.glareHardness == glareHardness &&
+          other.glareIntensity == glareIntensity &&
+          other.glareConvergence == glareConvergence &&
+          other.glareOppositeIntensity == glareOppositeIntensity &&
+          other.glareAngle == glareAngle &&
+          other.blurRadius == blurRadius &&
+          other.blurEdge == blurEdge &&
+          other.tint == tint &&
+          other.shadowBlur == shadowBlur &&
+          other.shadowIntensity == shadowIntensity &&
+          other.shadowOffset == shadowOffset;
 
   @override
   int get hashCode => Object.hash(
@@ -346,4 +388,31 @@ final class LiquidGlassSettings {
     shadowIntensity,
     shadowOffset,
   );
+
+  @override
+  String toString() {
+    final fields = <String>[
+      if (shape != null) 'shape: $shape',
+      if (thickness != null) 'thickness: $thickness',
+      if (indexOfRefraction != null) 'indexOfRefraction: $indexOfRefraction',
+      if (dispersion != null) 'dispersion: $dispersion',
+      if (fresnelRange != null) 'fresnelRange: $fresnelRange',
+      if (fresnelHardness != null) 'fresnelHardness: $fresnelHardness',
+      if (fresnelIntensity != null) 'fresnelIntensity: $fresnelIntensity',
+      if (glareRange != null) 'glareRange: $glareRange',
+      if (glareHardness != null) 'glareHardness: $glareHardness',
+      if (glareIntensity != null) 'glareIntensity: $glareIntensity',
+      if (glareConvergence != null) 'glareConvergence: $glareConvergence',
+      if (glareOppositeIntensity != null)
+        'glareOppositeIntensity: $glareOppositeIntensity',
+      if (glareAngle != null) 'glareAngle: $glareAngle',
+      if (blurRadius != null) 'blurRadius: $blurRadius',
+      if (blurEdge != null) 'blurEdge: $blurEdge',
+      if (tint != null) 'tint: $tint',
+      if (shadowBlur != null) 'shadowBlur: $shadowBlur',
+      if (shadowIntensity != null) 'shadowIntensity: $shadowIntensity',
+      if (shadowOffset != null) 'shadowOffset: $shadowOffset',
+    ];
+    return 'LiquidGlassSettings(${fields.join(', ')})';
+  }
 }
