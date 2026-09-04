@@ -544,9 +544,7 @@ void main() {
   );
 
   testWidgets('backdropFilter mode renders BackdropFilter stack, never '
-      'captures', (
-    tester,
-  ) async {
+      'captures', (tester) async {
     await _setUp(tester);
     await tester.pumpWidget(fallbackApp(child: const Text('on glass')));
     await tester.pump();
@@ -1253,6 +1251,34 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('nested panes assert in debug', (tester) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: _CheckerboardPainter()),
+                const Center(
+                  child: LiquidGlassContainer(
+                    width: 300,
+                    height: 300,
+                    child: Center(
+                      child: LiquidGlassContainer(width: 100, height: 100),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isAssertionError);
+  });
+
   testWidgets('thickness 0 renders without artifacts', (tester) async {
     await _setUp(tester);
     await tester.pumpWidget(
@@ -1352,9 +1378,7 @@ void main() {
     await _setUp(tester);
     await tester.pumpWidget(
       MaterialApp(
-        home: GlassBackdropScope(
-          child: GlassBackdropScope(child: Container()),
-        ),
+        home: GlassBackdropScope(child: GlassBackdropScope(child: Container())),
       ),
     );
     expect(tester.takeException(), isFlutterError);

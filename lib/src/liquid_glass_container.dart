@@ -1,3 +1,7 @@
+// Initializing formals for private named parameters need Dart 3.12; the
+// conventional constructor form keeps the language floor lower.
+// ignore_for_file: prefer_initializing_formals
+
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -670,7 +674,10 @@ class _GlassCaptureContext extends PaintingContext {
       } else if (boundaryLayer is ImageFilterLayer &&
           boundaryLayer.imageFilter != null) {
         _hasher.addInt(identityHashCode(boundaryLayer.imageFilter));
-        canvas.saveLayer(null, Paint()..imageFilter = boundaryLayer.imageFilter);
+        canvas.saveLayer(
+          null,
+          Paint()..imageFilter = boundaryLayer.imageFilter,
+        );
         child.paint(this, offset);
         canvas.restore();
       } else {
@@ -1007,6 +1014,20 @@ class GlassBackdropScope extends StatelessWidget {
         child: child,
       ),
     );
+  }
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties
+      ..add(
+        DiagnosticsProperty<LiquidGlassSettings>(
+          'settings',
+          settings,
+          defaultValue: null,
+        ),
+      )
+      ..add(EnumProperty<GlassRenderMode>('renderMode', renderMode));
   }
 }
 
@@ -1597,6 +1618,23 @@ class RenderGlassScope extends RenderProxyBox {
     _boundarySigs.clear();
     super.dispose();
   }
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties
+      ..add(DoubleProperty('devicePixelRatio', devicePixelRatio))
+      ..add(
+        FlagProperty(
+          'fallbackActive',
+          value: fallbackActive,
+          ifTrue: 'BackdropFilter fallback',
+          ifFalse: 'capture pipeline',
+        ),
+      )
+      ..add(IntProperty('generation', generation))
+      ..add(FlagProperty('isChurning', value: isChurning, ifTrue: 'churning'));
+  }
 }
 
 /// One glass container's slot in the scope's paint-order registry.
@@ -1735,6 +1773,24 @@ class LiquidGlassContainer extends SingleChildRenderObjectWidget {
       ..alignment = alignment.resolve(direction)
       ..clipBehavior = clipBehavior;
   }
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties
+      ..add(DoubleProperty('width', width, defaultValue: null))
+      ..add(DoubleProperty('height', height, defaultValue: null))
+      ..add(DiagnosticsProperty<EdgeInsetsGeometry>('padding', padding))
+      ..add(DiagnosticsProperty<AlignmentGeometry>('alignment', alignment))
+      ..add(EnumProperty<Clip>('clipBehavior', clipBehavior))
+      ..add(
+        DiagnosticsProperty<LiquidGlassSettings>(
+          'settings',
+          settings,
+          defaultValue: null,
+        ),
+      );
+  }
 }
 
 /// Render object behind [LiquidGlassContainer]: lays out like [Container]
@@ -1745,24 +1801,43 @@ class LiquidGlassContainer extends SingleChildRenderObjectWidget {
 class RenderLiquidGlassContainer extends RenderBox
     with RenderObjectWithChildMixin<RenderBox> {
   RenderLiquidGlassContainer({
-    required this._settings,
-    required this._width,
-    required this._height,
-    required this._padding,
-    required this._alignment,
-    required this._clipBehavior,
-  });
+    required LiquidGlassSettings settings,
+    double? width,
+    double? height,
+    required EdgeInsets padding,
+    required Alignment alignment,
+    required Clip clipBehavior,
+  }) : assert(
+         settings.isResolved,
+         'RenderLiquidGlassContainer needs fully resolved settings: merge '
+         'them over LiquidGlassSettings.defaults first.',
+       ),
+       _settings = settings,
+       _width = width,
+       _height = height,
+       _padding = padding,
+       _alignment = alignment,
+       _clipBehavior = clipBehavior;
 
-  /// Fully resolved (every field non-null, see [LiquidGlassSettings]).
   LiquidGlassSettings _settings;
+
+  /// The pane's visual settings, fully resolved (every field non-null, see
+  /// [LiquidGlassSettings.isResolved]).
   LiquidGlassSettings get settings => _settings;
   set settings(LiquidGlassSettings value) {
+    assert(
+      value.isResolved,
+      'RenderLiquidGlassContainer needs fully resolved settings: merge '
+      'them over LiquidGlassSettings.defaults first.',
+    );
     if (value == _settings) return;
     _settings = value;
     markNeedsPaint();
   }
 
   double? _width;
+
+  /// Fixed pane width in logical px; null sizes to the child (or expands).
   set width(double? value) {
     if (value == _width) return;
     _width = value;
@@ -1770,6 +1845,8 @@ class RenderLiquidGlassContainer extends RenderBox
   }
 
   double? _height;
+
+  /// Fixed pane height in logical px; null sizes to the child (or expands).
   set height(double? value) {
     if (value == _height) return;
     _height = value;
@@ -1777,6 +1854,8 @@ class RenderLiquidGlassContainer extends RenderBox
   }
 
   EdgeInsets _padding;
+
+  /// Space between the pane edge and the child.
   set padding(EdgeInsets value) {
     if (value == _padding) return;
     _padding = value;
@@ -1784,6 +1863,8 @@ class RenderLiquidGlassContainer extends RenderBox
   }
 
   Alignment _alignment;
+
+  /// The child's placement within the padded pane.
   set alignment(Alignment value) {
     if (value == _alignment) return;
     _alignment = value;
@@ -1791,6 +1872,8 @@ class RenderLiquidGlassContainer extends RenderBox
   }
 
   Clip _clipBehavior;
+
+  /// Clips the child to the glass shape when not [Clip.none].
   set clipBehavior(Clip value) {
     if (value == _clipBehavior) return;
     _clipBehavior = value;
@@ -1847,6 +1930,13 @@ class RenderLiquidGlassContainer extends RenderBox
     super.attach(owner);
     RenderObject? node = parent;
     while (node != null && node is! RenderGlassScope) {
+      assert(
+        node is! RenderLiquidGlassContainer,
+        'LiquidGlassContainer cannot be nested inside another '
+        'LiquidGlassContainer. A nested pane samples the raw backdrop and '
+        'ignores the glass around it. Put both panes directly under the '
+        'scope and let them overlap instead.',
+      );
       node = node.parent;
     }
     _scope = node as RenderGlassScope?;
@@ -1929,7 +2019,10 @@ class RenderLiquidGlassContainer extends RenderBox
   }
 
   @override
-  double? computeDryBaseline(BoxConstraints constraints, TextBaseline baseline) {
+  double? computeDryBaseline(
+    BoxConstraints constraints,
+    TextBaseline baseline,
+  ) {
     final ch = child;
     if (ch == null) return null;
     final c = _tightenFor(constraints);
@@ -2091,7 +2184,10 @@ class RenderLiquidGlassContainer extends RenderBox
       scope != null,
       'LiquidGlassContainer must be inside a GlassBackdropScope',
     );
-    if (scope == null) return;
+    if (scope == null) {
+      _paintChild(context, offset); // keep the child visible without glass
+      return;
+    }
     if (scope._fallbackActive) {
       _paintFallback(context, offset, scope);
       return;
@@ -2598,5 +2694,17 @@ class RenderLiquidGlassContainer extends RenderBox
     _releaseFbLayers();
     _childClip.layer = null;
     super.dispose();
+  }
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties
+      ..add(DoubleProperty('width', _width, defaultValue: null))
+      ..add(DoubleProperty('height', _height, defaultValue: null))
+      ..add(DiagnosticsProperty<EdgeInsets>('padding', _padding))
+      ..add(DiagnosticsProperty<Alignment>('alignment', _alignment))
+      ..add(EnumProperty<Clip>('clipBehavior', _clipBehavior))
+      ..add(DiagnosticsProperty<LiquidGlassSettings>('settings', _settings));
   }
 }

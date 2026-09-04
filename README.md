@@ -71,7 +71,7 @@ More options:
 
 ## Drawbacks
 
-- Panes must be descendants of the scope. Only translation is permitted between a pane and the scope: do not rotate or scale the pane itself. Do not nest scopes (asserts in debug).
+- Panes must be descendants of the scope. Only translation is permitted between a pane and the scope: do not rotate or scale the pane itself. Do not nest scopes, and do not put a pane inside another pane (both assert in debug).
 - The refraction cannot show platform views or textures. A `BackdropFilter` keeps its child content in the refraction, but the filter itself is dropped there. Opacity, color filters, image filters, shader masks, and clips are reproduced, but a `ShaderMask` forces a new capture on each repaint (its shader has no stable identity). Unknown custom layers keep their content, but force a new capture on each repaint; `FragmentShader` paints in the backdrop show correctly, but also force new captures.
 - Content behind a descendant repaint boundary (a scrolling list, a `FadeTransition`) reaches the refraction one frame late. Video frames update without a repaint, so the refraction cannot see them at all.
 - The `BackdropFilter` fallback does not reproduce chromatic dispersion, `blurEdge: false`, or the backdrop-derived glare color. It approximates refraction with a uniform lens.

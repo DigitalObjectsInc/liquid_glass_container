@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'liquid_glass_container.dart';
@@ -24,17 +25,48 @@ class AnimatedLiquidGlassContainer extends ImplicitlyAnimatedWidget {
     super.onEnd,
   });
 
+  /// Fixed pane width in logical px; null sizes to [child] (or expands).
   final double? width;
+
+  /// Fixed pane height in logical px; null sizes to [child] (or expands).
   final double? height;
+
+  /// Space between the pane edge and [child].
   final EdgeInsetsGeometry padding;
+
+  /// [child]'s placement within the padded pane.
   final AlignmentGeometry alignment;
+
+  /// Clips [child] to the glass shape when not [Clip.none]. Not animated.
   final Clip clipBehavior;
+
+  /// Per-pane overrides of the scope's settings (field-wise, null inherits).
   final LiquidGlassSettings? settings;
+
+  /// The widget below this widget in the tree, painted on top of the glass.
   final Widget? child;
 
   @override
   AnimatedWidgetBaseState<AnimatedLiquidGlassContainer> createState() =>
       _AnimatedLiquidGlassContainerState();
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+    properties
+      ..add(DoubleProperty('width', width, defaultValue: null))
+      ..add(DoubleProperty('height', height, defaultValue: null))
+      ..add(DiagnosticsProperty<EdgeInsetsGeometry>('padding', padding))
+      ..add(DiagnosticsProperty<AlignmentGeometry>('alignment', alignment))
+      ..add(EnumProperty<Clip>('clipBehavior', clipBehavior))
+      ..add(
+        DiagnosticsProperty<LiquidGlassSettings>(
+          'settings',
+          settings,
+          defaultValue: null,
+        ),
+      );
+  }
 }
 
 class _AnimatedLiquidGlassContainerState
