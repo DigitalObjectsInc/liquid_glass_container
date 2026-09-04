@@ -32,7 +32,10 @@ Future<void> _shoot(
           body: GlassBackdropScope(
             child: Stack(
               fit: StackFit.expand,
-              children: [MirrorTiledImage(asset: asset, aspect: aspect), ...panes],
+              children: [
+                MirrorTiledImage(asset: asset, aspect: aspect),
+                ...panes,
+              ],
             ),
           ),
         ),

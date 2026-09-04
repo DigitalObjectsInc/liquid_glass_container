@@ -126,9 +126,13 @@ class _DemoPageState extends State<DemoPage>
   Size _area = Size.zero;
   Timer? _autoTimer;
   int _autoStep = 0;
-  Offset? _pos; // spring position, logical px (null = centered, not yet moved)
+
+  /// Spring state: (position, velocity in logical px/s). Position null means
+  /// centered, not yet moved. A ValueNotifier, so a tick rebuilds only the
+  /// pane and not the whole page: a per-frame panel rebuild would skew the
+  /// frame timings this example reports.
+  final _springState = ValueNotifier<(Offset?, Offset)>((null, Offset.zero));
   Offset _target = Offset.zero;
-  Offset _velocity = Offset.zero; // logical px/s
   SpringSimulation? _simX, _simY;
   Duration _simStart = Duration.zero;
   Duration _now = Duration.zero;
@@ -145,10 +149,11 @@ class _DemoPageState extends State<DemoPage>
       _now = Duration.zero;
       _ticker.start();
     }
-    final p = _pos ?? area.center(Offset.zero);
+    final (pos, velocity) = _springState.value;
+    final p = pos ?? area.center(Offset.zero);
     _target = clamped;
-    _simX = SpringSimulation(_spring, p.dx, clamped.dx, _velocity.dx);
-    _simY = SpringSimulation(_spring, p.dy, clamped.dy, _velocity.dy);
+    _simX = SpringSimulation(_spring, p.dx, clamped.dx, velocity.dx);
+    _simY = SpringSimulation(_spring, p.dy, clamped.dy, velocity.dy);
     _simStart = _now;
   }
 
@@ -162,14 +167,11 @@ class _DemoPageState extends State<DemoPage>
       pos = _target;
       velocity = Offset.zero;
     }
-    setState(() {
-      _pos = pos;
-      _velocity = velocity;
-    });
     if (_simX!.isDone(t) && _simY!.isDone(t)) {
       _ticker.stop();
-      _velocity = Offset.zero;
+      velocity = Offset.zero;
     }
+    _springState.value = (pos, velocity);
   }
 
   @override
@@ -232,6 +234,7 @@ class _DemoPageState extends State<DemoPage>
   void dispose() {
     _autoTimer?.cancel();
     _ticker.dispose();
+    _springState.dispose();
     if (kProfileMode) {
       SchedulerBinding.instance.removeTimingsCallback(_reportTimings);
     }
@@ -242,10 +245,6 @@ class _DemoPageState extends State<DemoPage>
   Widget build(BuildContext context) {
     final p = _p;
     final dpr = MediaQuery.of(context).devicePixelRatio;
-    // reference App.tsx: shape stretched by |spring speed| (device px/ms)
-    final speed = _velocity * dpr / 1000;
-    final w = p.width + speed.dx.abs() * p.width * _springSizeFactor / 100;
-    final h = p.height + speed.dy.abs() * p.height * _springSizeFactor / 100;
 
     // Passed at the scope, so the panes below carry no per-pane settings.
     final settings = LiquidGlassSettings(
@@ -280,12 +279,6 @@ class _DemoPageState extends State<DemoPage>
           LayoutBuilder(
             builder: (context, constraints) {
               final area = _area = constraints.biggest;
-              final raw = _pos ?? area.center(Offset.zero);
-              // spring overshoot stays on screen
-              final pos = Offset(
-                raw.dx.clamp(0.0, area.width),
-                raw.dy.clamp(0.0, area.height),
-              );
               return Listener(
                 behavior: HitTestBehavior.opaque,
                 onPointerHover: (e) => _retarget(e.localPosition, area),
@@ -329,17 +322,44 @@ class _DemoPageState extends State<DemoPage>
                             ),
                           ),
                         ),
-                      Positioned(
-                        left: pos.dx - w / 2,
-                        top: pos.dy - h / 2,
-                        child: LiquidGlassContainer(
-                          width: w,
-                          height: h,
-                          child: const Text(
-                            'Liquid Glass',
-                            style: _paneTextStyle,
-                          ),
-                        ),
+                      ValueListenableBuilder<(Offset?, Offset)>(
+                        valueListenable: _springState,
+                        builder: (context, spring, _) {
+                          final (rawPos, velocity) = spring;
+                          final raw = rawPos ?? area.center(Offset.zero);
+                          // spring overshoot stays on screen
+                          final pos = Offset(
+                            raw.dx.clamp(0.0, area.width),
+                            raw.dy.clamp(0.0, area.height),
+                          );
+                          // reference App.tsx: shape stretched by
+                          // |spring speed| (device px/ms)
+                          final speed = velocity * dpr / 1000;
+                          final w =
+                              p.width +
+                              speed.dx.abs() *
+                                  p.width *
+                                  _springSizeFactor /
+                                  100;
+                          final h =
+                              p.height +
+                              speed.dy.abs() *
+                                  p.height *
+                                  _springSizeFactor /
+                                  100;
+                          return Positioned(
+                            left: pos.dx - w / 2,
+                            top: pos.dy - h / 2,
+                            child: LiquidGlassContainer(
+                              width: w,
+                              height: h,
+                              child: const Text(
+                                'Liquid Glass',
+                                style: _paneTextStyle,
+                              ),
+                            ),
+                          );
+                        },
                       ),
                     ],
                   ),
