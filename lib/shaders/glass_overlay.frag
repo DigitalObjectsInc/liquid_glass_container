@@ -59,13 +59,17 @@ void main() {
     acc = over(vec3(0.0), clamp(shadowTerm(p), 0.0, 1.0), acc);
     acc = over(u_tint.rgb, u_tint.a * 0.8, acc);
 
-    // same edge gate as the refraction branch
-    float x_R_ratio = 1.0 - nmerged / u_refThickness;
-    float thetaI = safeAsin(pow(x_R_ratio, 2.0));
-    float thetaT = safeAsin(1.0 / u_refFactor * sin(thetaI));
-    float edgeFactor = -1.0 * tan(thetaT - thetaI);
+    // same edge gate as the refraction branch (thickness 0 guarded: the
+    // ratio would divide by zero)
+    float edgeFactor = 0.0;
+    if (u_refThickness > 0.0 && nmerged < u_refThickness) {
+      float x_R_ratio = 1.0 - nmerged / u_refThickness;
+      float thetaI = safeAsin(x_R_ratio * x_R_ratio);
+      float thetaT = safeAsin(1.0 / u_refFactor * sin(thetaI));
+      edgeFactor = -1.0 * tan(thetaT - thetaI);
+    }
 
-    if (nmerged < u_refThickness && edgeFactor > 0.0) {
+    if (edgeFactor > 0.0) {
       vec2 normal = getNormal(p); // y-down
 
       // fresnel
@@ -79,7 +83,8 @@ void main() {
 
       acc = over(
         LCH_TO_SRGB(fresnelTintLCH),
-        clamp(fresnelFactor * u_refFresnelFactor * 0.7 * length(normal), 0.0, 1.0),
+        clamp(fresnelFactor * u_refFresnelFactor * 0.7 * normalWeight(normal),
+          0.0, 1.0),
         acc);
 
       // glare (reference math is y-up: flip the normal for the angle)
@@ -105,7 +110,8 @@ void main() {
 
       acc = over(
         LCH_TO_SRGB(glareTintLCH),
-        clamp(glareAngleFactor * glareGeoFactor * length(normal), 0.0, 1.0),
+        clamp(glareAngleFactor * glareGeoFactor * normalWeight(normal),
+          0.0, 1.0),
         acc);
     }
   }

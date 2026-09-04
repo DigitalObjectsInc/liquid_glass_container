@@ -102,13 +102,14 @@ void main() {
   if (merged < 0.005) {
     float nmerged = -1.0 * (merged * res1xy);
 
-    // refraction edge factor
-    float x_R_ratio = 1.0 - nmerged / u_refThickness;
-    float thetaI = safeAsin(pow(x_R_ratio, 2.0));
-    float thetaT = safeAsin(1.0 / u_refFactor * sin(thetaI));
-    float edgeFactor = -1.0 * tan(thetaT - thetaI);
-    if (nmerged >= u_refThickness) {
-      edgeFactor = 0.0;
+    // refraction edge factor; guarded: thickness 0 would divide by zero (a
+    // NaN ring in the AA fringe), and interior fragments skip the trig
+    float edgeFactor = 0.0;
+    if (u_refThickness > 0.0 && nmerged < u_refThickness) {
+      float x_R_ratio = 1.0 - nmerged / u_refThickness;
+      float thetaI = safeAsin(x_R_ratio * x_R_ratio);
+      float thetaT = safeAsin(1.0 / u_refFactor * sin(thetaI));
+      edgeFactor = -1.0 * tan(thetaT - thetaI);
     }
 
     if (edgeFactor <= 0.0) {
@@ -142,7 +143,7 @@ void main() {
       outColor = mix(
         outColor,
         vec4(LCH_TO_SRGB(fresnelTintLCH), 1.0),
-        fresnelFactor * u_refFresnelFactor * 0.7 * length(normal));
+        fresnelFactor * u_refFresnelFactor * 0.7 * normalWeight(normal));
 
       // glare (reference math is y-up: flip the normal for the angle)
       float glareGeoFactor = pow5clamp01(
@@ -168,7 +169,8 @@ void main() {
       outColor = mix(
         outColor,
         vec4(LCH_TO_SRGB(glareTintLCH), 1.0),
-        glareAngleFactor * glareGeoFactor * length(normal));
+        clamp(glareAngleFactor * glareGeoFactor * normalWeight(normal),
+          0.0, 1.0));
     }
   } else {
     // only reachable in the AA fringe of the clip: match the backdrop

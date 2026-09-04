@@ -51,6 +51,15 @@ vec2 getNormal(vec2 p) {
   return grad * 1.414213562 * 1000.0;
 }
 
+// Fresnel/glare weight from the SDF gradient. The reference weights these by
+// length(getNormal()), which is ~1414 / u_scopeRes.y: the strength then
+// changes with scope size and DPR, and small scopes extrapolate past the
+// tint. Normalize to the reference's ~1000-device-px canvas and clamp there,
+// so every scope gets the reference look.
+float normalWeight(vec2 normal) {
+  return min(length(normal) * u_scopeRes.y * 0.001, 1.414213562);
+}
+
 vec2 safeNormalize(vec2 v) {
   float len = length(v);
   if (len < 1e-8) return vec2(0.0);

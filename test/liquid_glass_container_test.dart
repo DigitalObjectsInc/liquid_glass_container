@@ -906,6 +906,49 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('thickness 0 renders without artifacts', (tester) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: const [
+                  ColoredBox(color: Color(0xFFFFFFFF)),
+                  Positioned(
+                    left: 100,
+                    top: 100,
+                    child: LiquidGlassContainer(
+                      width: 200,
+                      height: 200,
+                      settings: LiquidGlassSettings(thickness: 0),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byType(RepaintBoundary).first,
+    );
+    final image = await tester.runAsync(() => boundary.toImage());
+    final data = await tester.runAsync(
+      () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
+    );
+    int lum(int x, int y) => data!.getUint8((y * image!.width + x) * 4);
+    // interior over white stays white; a NaN ring would corrupt the fringe
+    expect(lum(200, 200), greaterThan(200));
+    expect(lum(102, 200), greaterThan(150)); // just inside the left edge
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('nested scopes assert in debug', (tester) async {
     await _setUp(tester);
     await tester.pumpWidget(
