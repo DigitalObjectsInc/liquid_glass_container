@@ -69,6 +69,23 @@ class _HarnessState extends State<_Harness> {
   );
 }
 
+/// Draws a caller-owned (possibly mutated in place) path; [rev] forces the
+/// repaint.
+class _PathPainter extends CustomPainter {
+  _PathPainter(this.path, this.rev);
+
+  final Path path;
+  final int rev;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawPath(path, Paint()..color = const Color(0xFF2244AA));
+  }
+
+  @override
+  bool shouldRepaint(_PathPainter oldDelegate) => oldDelegate.rev != rev;
+}
+
 Future<void> _setUp(WidgetTester tester) async {
   await tester.binding.setSurfaceSize(const Size(600, 600));
   tester.view.physicalSize = const Size(1200, 1200);
@@ -1023,6 +1040,109 @@ void main() {
     expect(ch(120, 80, 1), greaterThan(200)); // g
     // semi-green box over the backdrop filter must still be green-tinted
     expect(ch(120, 130, 1) - ch(120, 130, 0), greaterThan(40));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('in-place path mutation invalidates the capture', (tester) async {
+    await _setUp(tester);
+    final path = Path()..addRect(const Rect.fromLTWH(100, 100, 100, 100));
+    var rev = 0;
+    late StateSetter repaint;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                const ColoredBox(color: Color(0xFFFFFFFF)),
+                StatefulBuilder(
+                  builder: (context, setState) {
+                    repaint = setState;
+                    return CustomPaint(painter: _PathPainter(path, rev));
+                  },
+                ),
+                const Positioned(
+                  left: 300,
+                  top: 300,
+                  child: LiquidGlassContainer(width: 150, height: 150),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final scope = _scope(tester);
+    final genBefore = scope.generation;
+
+    // same identity, same bounds, different geometry
+    repaint(() {
+      rev++;
+      path
+        ..reset()
+        ..addOval(const Rect.fromLTWH(100, 100, 100, 100));
+    });
+    await tester.pump();
+    await tester.pump();
+    expect(scope.generation, greaterThan(genBefore));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('glass moving over Material (fresh identical paths) reuses '
+      'the capture', (tester) async {
+    await _setUp(tester);
+    var paneLeft = 350.0;
+    late StateSetter setPaneLeft;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                const ColoredBox(color: Color(0xFFFFFFFF)),
+                const Positioned(
+                  left: 80,
+                  top: 80,
+                  child: Card(
+                    elevation: 4,
+                    child: SizedBox(width: 140, height: 90),
+                  ),
+                ),
+                StatefulBuilder(
+                  builder: (context, setState) {
+                    setPaneLeft = setState;
+                    return Positioned(
+                      left: paneLeft,
+                      top: 300,
+                      child: const LiquidGlassContainer(
+                        width: 150,
+                        height: 150,
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final scope = _scope(tester);
+    final genBefore = scope.generation;
+
+    for (var i = 1; i <= 5; i++) {
+      setPaneLeft(() => paneLeft = 350.0 + i * 4);
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    // PhysicalShape allocates a fresh (identical) path per paint: the
+    // content hash must match, so the capture is reused
+    expect(scope.generation, genBefore);
     expect(tester.takeException(), isNull);
   });
 

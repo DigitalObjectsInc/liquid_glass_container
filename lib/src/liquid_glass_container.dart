@@ -117,11 +117,14 @@ class _FrameHasher {
   int get b => _b;
 }
 
-/// Canvas proxy that folds every draw command into the frame hash so the scope
-/// can tell whether the backdrop recording actually changed. Objects without
-/// content equality are folded by identity (+ cheap metrics): a false mismatch
-/// only costs a recapture, never a stale backdrop. Mutable-without-identity
-/// cases (FragmentShader uniforms) poison the hash instead.
+/// Canvas proxy that folds every draw command into the frame hash so the
+/// scope can tell whether the backdrop recording actually changed. Objects
+/// with value equality fold their hashCode. Paths fold a content heuristic
+/// (fill type, bounds, per-contour length and midpoint tangent): a mutation
+/// that keeps all of those equal would go unseen, which is accepted. Other
+/// objects (images, shaders) fold by identity and can only false-mismatch,
+/// which costs a recapture. Mutable-without-identity cases (FragmentShader
+/// uniforms) poison the hash instead.
 class _HashingCanvas implements Canvas {
   _HashingCanvas(this._c, this._h);
 
@@ -146,10 +149,28 @@ class _HashingCanvas implements Canvas {
     _i(r.hashCode);
   }
 
+  // Content hash. Identity is unusable in both directions: the framework
+  // shifts a fresh Path per paint (PhysicalShape, pushClipPath), which would
+  // force a recapture every frame, and a painter can mutate one Path in
+  // place, which would freeze the capture. Fold fill type, bounds, and per
+  // contour the length, closedness, and midpoint tangent.
   void _path(Path p) {
-    // identity + bounds: paths are folded conservatively (see class doc)
-    _i(identityHashCode(p));
+    _i(p.fillType.index);
     _rect(p.getBounds());
+    var n = 0;
+    for (final m in p.computeMetrics()) {
+      n++;
+      _d(m.length);
+      _i(m.isClosed ? 1 : 0);
+      if (m.length > 0) {
+        final t = m.getTangentForOffset(m.length / 2);
+        if (t != null) {
+          _off(t.position);
+          _d(t.angle);
+        }
+      }
+    }
+    _i(n);
   }
 
   void _img(ui.Image i) => _i(identityHashCode(i));
