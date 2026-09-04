@@ -1186,7 +1186,7 @@ class RenderGlassScope extends RenderProxyBox {
   // each boundary's retained layer subtree and marks the scope dirty on any
   // change, so the capture follows with one frame of latency.
   final Set<RenderObject> _boundaries = {};
-  final Map<RenderObject, int> _boundarySigs = {};
+  final Map<RenderObject, (int, int)> _boundarySigs = {};
   bool _watcherArmed = false;
 
   /// Set when the capture inlined a boundary that had not composited yet (its
@@ -1208,7 +1208,7 @@ class RenderGlassScope extends RenderProxyBox {
       return;
     }
     var changed = false;
-    final prev = Map<RenderObject, int>.of(_boundarySigs);
+    final prev = Map<RenderObject, (int, int)>.of(_boundarySigs);
     _boundarySigs.clear();
     for (final b in _boundaries) {
       if (!b.attached) continue; // its removal repainted a tracked ancestor
@@ -1229,8 +1229,8 @@ class RenderGlassScope extends RenderProxyBox {
   /// [ImageFilterLayer.imageFilter] in place, and both must invalidate.
   /// (Texture and platform-view frames change nothing Dart-visible — those
   /// stay outside the refraction, as documented.)
-  static int _layerSig(Layer? root) {
-    if (root == null) return 0;
+  static (int, int) _layerSig(Layer? root) {
+    if (root == null) return (0, 0);
     final h = _FrameHasher();
     void fold(Layer l) {
       h.addInt(identityHashCode(l));
@@ -1255,8 +1255,7 @@ class RenderGlassScope extends RenderProxyBox {
     }
 
     fold(root);
-    // both 30-bit lanes, exact within web-safe integer range
-    return h.a * 0x40000000 + h.b;
+    return (h.a, h.b); // both lanes; a packed int would lose bits on dart2js
   }
 
   /// Records each sampled pane's child into its entry (scope-logical
