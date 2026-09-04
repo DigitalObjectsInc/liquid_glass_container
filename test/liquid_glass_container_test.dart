@@ -1201,6 +1201,58 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('scope resize with identical draw commands recaptures', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    var side = 400.0;
+    late StateSetter setSide;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: StatefulBuilder(
+              builder: (context, setState) {
+                setSide = setState;
+                return SizedBox(
+                  width: side,
+                  height: side,
+                  child: GlassBackdropScope(
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: const [
+                        Positioned(
+                          left: 0,
+                          top: 0,
+                          width: 100,
+                          height: 100,
+                          child: ColoredBox(color: Color(0xFFFFFFFF)),
+                        ),
+                        Positioned(
+                          left: 20,
+                          top: 20,
+                          child: LiquidGlassContainer(width: 100, height: 100),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final scope = _scope(tester);
+    final genBefore = scope.generation;
+    setSide(() => side = 500);
+    await tester.pump();
+    await tester.pump();
+    expect(scope.generation, greaterThan(genBefore));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('thickness 0 renders without artifacts', (tester) async {
     await _setUp(tester);
     await tester.pumpWidget(

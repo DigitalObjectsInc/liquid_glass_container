@@ -1266,11 +1266,22 @@ class RenderGlassScope extends RenderProxyBox {
         this,
         registerGlass: false,
       );
+      final paneOrigin = e.glassPx.topLeft / _devicePixelRatio;
       final childOffset = (childBox.parentData! as BoxParentData).offset;
-      ctx.paintChild(
-        childBox,
-        e.glassPx.topLeft / _devicePixelRatio + childOffset,
-      );
+      final clip = e.container._clipBehavior;
+      if (clip == Clip.none) {
+        ctx.paintChild(childBox, paneOrigin + childOffset);
+      } else {
+        // same clip as the live child paint (_paintChild)
+        ctx.pushClipPath(
+          false,
+          paneOrigin,
+          Offset.zero & e.container.size,
+          e.container._glassPathFor(e.container.size),
+          (c, o) => c.paintChild(childBox, o + childOffset),
+          clipBehavior: clip,
+        );
+      }
       // ignore: invalid_use_of_protected_member
       ctx.stopRecordingIfNeeded();
       e.childLayer = root;
@@ -1470,18 +1481,31 @@ class RenderGlassScope extends RenderProxyBox {
     _boundaries.clear();
     _sawUncomposited = false;
     final OffsetLayer captureLayer = OffsetLayer();
-    final hasher = _FrameHasher();
+    // Fold the scope geometry: identical draw commands at a new size or DPR
+    // must not reuse the old full-scope texture.
+    final hasher = _FrameHasher()
+      ..addDouble(size.width)
+      ..addDouble(size.height)
+      ..addDouble(_devicePixelRatio);
     final captureContext = _GlassCaptureContext(
       captureLayer,
       Offset.zero & size,
       hasher,
       this,
     );
-    super.paint(captureContext, Offset.zero);
-    // Same pattern as the framework's SnapshotWidget.
-    // ignore: invalid_use_of_protected_member
-    captureContext.stopRecordingIfNeeded();
-    _capturing = false;
+    var captured = false;
+    try {
+      super.paint(captureContext, Offset.zero);
+      // Same pattern as the framework's SnapshotWidget.
+      // ignore: invalid_use_of_protected_member
+      captureContext.stopRecordingIfNeeded();
+      captured = true;
+    } finally {
+      // one throwing backdrop widget must not disable glass for the scope's
+      // lifetime, and the partial recording must not leak
+      _capturing = false;
+      if (!captured) captureLayer.dispose();
+    }
     _recordChildren();
     _armBoundaryWatcher();
     if (_sawUncomposited) {
@@ -2284,8 +2308,11 @@ class RenderLiquidGlassContainer extends RenderBox
     s.setFloat(i++, cfg.shadowOffset!.dy);
     s.setFloat(i++, texRect.left); // u_cropOrigin
     s.setFloat(i++, texRect.top);
-    s.setFloat(i++, texRect.width); // u_cropSize
-    s.setFloat(i++, texRect.height);
+    // u_cropSize comes from the actual texture: toImageSync ceils
+    // logical * dpr, so a fractional DPR can make the image one texel larger
+    // than the requested rect, and the uv mapping must use the real extent.
+    s.setFloat(i++, sharp.width.toDouble()); // u_cropSize
+    s.setFloat(i++, sharp.height.toDouble());
     s.setImageSampler(0, blurred, filterQuality: FilterQuality.low);
     s.setImageSampler(1, sharp, filterQuality: FilterQuality.low);
   }
