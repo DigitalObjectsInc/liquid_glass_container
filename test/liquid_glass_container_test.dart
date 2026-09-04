@@ -906,6 +906,126 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('retained composited layers in a clean boundary stay on '
+      'screen', (tester) async {
+    await _setUp(tester);
+    const invert = ColorFilter.matrix([
+      -1, 0, 0, 0, 255, //
+      0, -1, 0, 0, 255, //
+      0, 0, -1, 0, 255, //
+      0, 0, 0, 1, 0, //
+    ]);
+    var paneLeft = 400.0;
+    late StateSetter setPaneLeft;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  const ColoredBox(color: Color(0xFFFFFFFF)),
+                  // content that pushes retained composited layers, isolated
+                  // behind its own boundary
+                  Positioned(
+                    left: 60,
+                    top: 60,
+                    width: 120,
+                    height: 90,
+                    child: RepaintBoundary(
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          const Positioned(
+                            left: 0,
+                            top: 0,
+                            width: 120,
+                            height: 40,
+                            child: ColorFiltered(
+                              colorFilter: invert,
+                              child: ColoredBox(color: Color(0xFFFF0000)),
+                            ),
+                          ),
+                          Positioned(
+                            left: 0,
+                            top: 50,
+                            width: 120,
+                            height: 40,
+                            child: ClipRect(
+                              child: BackdropFilter(
+                                filter: ui.ImageFilter.blur(
+                                  sigmaX: 4,
+                                  sigmaY: 4,
+                                ),
+                                child: const ColoredBox(
+                                  color: Color(0x8800FF00),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  StatefulBuilder(
+                    builder: (context, setState) {
+                      setPaneLeft = setState;
+                      return Positioned(
+                        left: paneLeft,
+                        top: 400,
+                        child: const LiquidGlassContainer(
+                          width: 150,
+                          height: 150,
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    {
+      final boundary = tester.renderObject<RenderRepaintBoundary>(
+        find.byType(RepaintBoundary).first,
+      );
+      final image = await tester.runAsync(() => boundary.toImage());
+      final data = await tester.runAsync(
+        () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
+      );
+      int ch(int x, int y, int c) =>
+          data!.getUint8((y * image!.width + x) * 4 + c);
+      // sanity: the content is on screen before the clean-boundary reuse
+      expect(ch(120, 80, 0), lessThan(60));
+    }
+    // scope repaints while the boundary is clean: the capture must not steal
+    // the boundary's retained layers
+    setPaneLeft(() => paneLeft = 410);
+    await tester.pump();
+    await tester.pump();
+
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byType(RepaintBoundary).first,
+    );
+    final image = await tester.runAsync(() => boundary.toImage());
+    final data = await tester.runAsync(
+      () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
+    );
+    int ch(int x, int y, int c) =>
+        data!.getUint8((y * image!.width + x) * 4 + c);
+    // inverted red box must read cyan, not the white backdrop
+    expect(ch(120, 80, 0), lessThan(60)); // r
+    expect(ch(120, 80, 1), greaterThan(200)); // g
+    // semi-green box over the backdrop filter must still be green-tinted
+    expect(ch(120, 130, 1) - ch(120, 130, 0), greaterThan(40));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('thickness 0 renders without artifacts', (tester) async {
     await _setUp(tester);
     await tester.pumpWidget(

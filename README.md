@@ -72,7 +72,7 @@ More options:
 ## Drawbacks
 
 - Panes must be descendants of the scope. Only translation is permitted between a pane and the scope: do not rotate or scale the pane itself. Do not nest scopes (asserts in debug).
-- The refraction cannot show backdrop content that Flutter does not record into pictures: platform views, textures, and retained composited layers (`BackdropFilter`, `ShaderMask`, `CompositedTransformFollower`). Such content also causes a new capture on each repaint. `FragmentShader` paints show correctly, but also cause new captures.
+- The refraction cannot show platform views or textures. A `BackdropFilter` keeps its child content in the refraction, but the filter itself is dropped there. Opacity, color filters, image filters, shader masks, and clips are reproduced, but a `ShaderMask` forces a new capture on each repaint (its shader has no stable identity). Unknown custom layers keep their content, but force a new capture on each repaint; `FragmentShader` paints in the backdrop show correctly, but also force new captures.
 - Content behind a descendant repaint boundary (a scrolling list, a `FadeTransition`) reaches the refraction one frame late. Video frames update without a repaint, so the refraction cannot see them at all.
 - The `BackdropFilter` fallback does not reproduce chromatic dispersion, `blurEdge: false`, or the backdrop-derived glare color. It approximates refraction with a uniform lens.
 - The blur, the drop shadow, and the edge anti-aliasing are Skia approximations of the reference math. Fresnel and glare strength is normalized to the reference's ~1000-device-px canvas, so it does not change with scope size or DPR (in the reference it does).

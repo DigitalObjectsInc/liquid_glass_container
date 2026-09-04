@@ -560,6 +560,16 @@ class _HashingCanvas implements Canvas {
     _i(transparentOccluder ? 1 : 0);
     _c.drawShadow(path, color, elevation, transparentOccluder);
   }
+
+  // Canvas members added by future Flutter versions land here instead of
+  // breaking every consumer's compile. The draw is omitted from the capture
+  // (the screen is unaffected: this canvas only feeds the backdrop
+  // recording) and the poison forces a recapture every frame.
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    _h.poison();
+    return null;
+  }
 }
 
 /// PaintingContext for the backdrop capture: skips glass containers (they are
@@ -652,15 +662,130 @@ class _GlassCaptureContext extends PaintingContext {
 
   @override
   void appendLayer(Layer layer) {
-    // Unknown layer content (textures, platform views, custom layers) can't
-    // be hashed or re-recorded: such content is omitted from the capture
-    // (the live pass reclaims retained layers appended here) and the poison
-    // forces a recapture every frame. Annotated regions are pure metadata
-    // wrappers created fresh each paint — their content is painted through a
-    // child context of this one and hashes normally, so they are exempt
-    // (every AppBar pushes one for system chrome).
-    if (layer is! AnnotatedRegionLayer) _hasher.poison();
-    super.appendLayer(layer);
+    // NEVER adopt a layer into the capture tree. Most layers that reach here
+    // are a render object's retained live layer; the default appendLayer
+    // calls layer.remove(), which detaches it from the visible tree. A clean
+    // repaint boundary then re-composites without it and its content
+    // vanishes from the screen. Leaf layers (textures, platform views) also
+    // land here: their content cannot enter a flat recording, so it is
+    // omitted from the refraction and the poison forces a recapture every
+    // frame. Not calling super also keeps the current recording (and its
+    // save stack) alive.
+    _hasher.poison();
+  }
+
+  @override
+  void addLayer(Layer layer) {
+    // The base method stops the current recording (dropping its save stack,
+    // so later siblings would record unclipped) before it appends. Same
+    // treatment as appendLayer: poison only, keep the recording alive.
+    _hasher.poison();
+  }
+
+  @override
+  void pushLayer(
+    ContainerLayer childLayer,
+    PaintingContextCallback painter,
+    Offset offset, {
+    Rect? childPaintBounds,
+  }) {
+    // Same rule as appendLayer: never parent or mutate the passed layer.
+    // Emulate the common effects inline; the wrapped canvas hashes the
+    // emulation parameters (paint color, filters, shader identity).
+    if (childLayer is OpacityLayer) {
+      final alpha = childLayer.alpha ?? 255;
+      canvas.saveLayer(null, Paint()..color = Color.fromARGB(alpha, 0, 0, 0));
+      painter(this, offset);
+      canvas.restore();
+    } else if (childLayer is ColorFilterLayer &&
+        childLayer.colorFilter != null) {
+      canvas.saveLayer(null, Paint()..colorFilter = childLayer.colorFilter);
+      painter(this, offset);
+      canvas.restore();
+    } else if (childLayer is ImageFilterLayer &&
+        childLayer.imageFilter != null) {
+      canvas.saveLayer(null, Paint()..imageFilter = childLayer.imageFilter);
+      painter(this, offset);
+      canvas.restore();
+    } else if (childLayer is ShaderMaskLayer &&
+        childLayer.shader != null &&
+        childLayer.maskRect != null) {
+      final maskRect = childLayer.maskRect!;
+      canvas.saveLayer(null, Paint());
+      painter(this, offset);
+      // the shader's origin is maskRect's top-left, not the canvas origin
+      canvas.save();
+      canvas.translate(maskRect.left, maskRect.top);
+      canvas.drawRect(
+        Offset.zero & maskRect.size,
+        Paint()
+          ..shader = childLayer.shader
+          ..blendMode = childLayer.blendMode ?? BlendMode.modulate,
+      );
+      canvas.restore();
+      canvas.restore();
+    } else if (childLayer is ClipRectLayer && childLayer.clipRect != null) {
+      canvas.save();
+      canvas.clipRect(childLayer.clipRect!);
+      painter(this, offset);
+      canvas.restore();
+    } else if (childLayer is ClipRRectLayer && childLayer.clipRRect != null) {
+      canvas.save();
+      canvas.clipRRect(childLayer.clipRRect!);
+      painter(this, offset);
+      canvas.restore();
+    } else if (childLayer is ClipPathLayer && childLayer.clipPath != null) {
+      canvas.save();
+      canvas.clipPath(childLayer.clipPath!);
+      painter(this, offset);
+      canvas.restore();
+    } else if (childLayer is TransformLayer && childLayer.transform != null) {
+      canvas.save();
+      canvas.transform(childLayer.transform!.storage);
+      painter(this, offset);
+      canvas.restore();
+    } else if (childLayer is BackdropFilterLayer) {
+      // A backdrop effect cannot replay into a flat recording: keep the
+      // child content, drop the filter. The backdrop under it is already in
+      // the recording, so the hash still tracks every visible change.
+      _hasher.addInt(40);
+      _hasher.addInt(childLayer.filter?.hashCode ?? 0);
+      painter(this, offset);
+    } else if (childLayer is AnnotatedRegionLayer) {
+      // pure metadata (system chrome, semantics): content only
+      painter(this, offset);
+    } else {
+      // unknown semantics (Leader/Follower, custom layers): keep the
+      // content, recapture every frame
+      _hasher.poison();
+      painter(this, offset);
+    }
+  }
+
+  @override
+  ClipRSuperellipseLayer? pushClipRSuperellipse(
+    bool needsCompositing,
+    Offset offset,
+    Rect bounds,
+    RSuperellipse clipRSuperellipse,
+    PaintingContextCallback painter, {
+    Clip clipBehavior = Clip.antiAlias,
+    ClipRSuperellipseLayer? oldLayer,
+  }) {
+    super.pushClipRSuperellipse(
+      false,
+      offset,
+      bounds,
+      clipRSuperellipse,
+      painter,
+      clipBehavior: clipBehavior,
+    );
+    return clipBehavior == Clip.none
+        ? null
+        : ClipRSuperellipseLayer(
+            clipRSuperellipse: clipRSuperellipse.shift(offset),
+            clipBehavior: clipBehavior,
+          );
   }
 
   // The push* overrides force the non-composited inline path (recorded through
