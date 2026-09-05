@@ -1670,7 +1670,7 @@ class _GlassEntry {
 }
 
 /// A glass pane with the liquid-glass effect, ported from
-/// https://github.com/iyinchao/liquid-glass-studio (STEP 9 composite).
+/// https://github.com/iyinchao/liquid-glass-studio.
 ///
 /// Must be a descendant of a [GlassBackdropScope]. Visuals come from
 /// [settings], resolved field-wise over the scope's settings and

@@ -1,6 +1,6 @@
 # liquid_glass_container
 
-Liquid glass for Flutter. Each glass pane refracts the pixels behind it in one fragment-shader draw. The effect is a port of [liquid-glass-studio](https://github.com/iyinchao/liquid-glass-studio) (final STEP 9 composite). One implementation runs on iOS, Android, desktop, and web.
+Liquid glass for Flutter. Each glass pane refracts the pixels behind it in one fragment-shader draw. The effect is a port of [liquid-glass-studio](https://github.com/iyinchao/liquid-glass-studio). One implementation runs on iOS, Android, desktop, and web.
 
 ![Liquid glass panes over a wallpaper](doc/hero.png)
 
