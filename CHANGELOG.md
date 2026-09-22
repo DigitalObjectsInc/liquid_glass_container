@@ -1,3 +1,15 @@
+# 0.1.2
+
+- `CompositedTransformFollower` content (dropdown menus, text selection
+  handles, anything anchored to a `CompositedTransformTarget`) is captured
+  inline with the transform it was last composited with, instead of at its
+  own layout offset and poisoning the frame hash. A follower inside a
+  capture-mode `GlassBackdropScope` now refracts where it shows on screen,
+  and no longer forces a recapture and re-raster on every frame for as long
+  as it stands (seen as a scope wrapping the `Navigator` never settling while
+  a `TextField` in an overlay was focused). A follower that moves with its
+  leader is picked up by the post-frame watcher, one frame late.
+
 # 0.1.1
 
 - Fix editable text (and any subtree behind a `CompositedTransformTarget`,

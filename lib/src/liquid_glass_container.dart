@@ -718,8 +718,12 @@ class _GlassCaptureContext extends PaintingContext {
       }
       return;
     }
-    // A render object's retained `layer` (LeaderLayer, FollowerLayer,
-    // ShaderMaskLayer, ...) is mutated in place by its paint — offset, link,
+    if (child is RenderFollowerLayer) {
+      _paintFollower(child, offset);
+      return;
+    }
+    // A render object's retained `layer` (LeaderLayer, ShaderMaskLayer, ...)
+    // is mutated in place by its paint — offset, link,
     // maskRect — before being pushed. That layer is live in the on-screen
     // tree, and a clean boundary re-composites it as-is, so a mutation made
     // with this walk's offsets would displace what the screen shows
@@ -743,6 +747,42 @@ class _GlassCaptureContext extends PaintingContext {
       // ignore: invalid_use_of_protected_member
       child.layer = keep.layer; // drops the throwaway
       keep.layer = null;
+    }
+  }
+
+  /// Where a follower stands is settled while compositing, against its
+  /// leader anywhere in the tree, which a flat recording never runs: replay
+  /// the transform it was last composited with instead of poisoning the
+  /// hash. A leader that moves is picked up by the scope's post-frame
+  /// watcher, one frame late; a follower that has not composited yet is
+  /// painted at its own offset and converges the same way.
+  void _paintFollower(RenderFollowerLayer follower, Offset offset) {
+    if (follower.link.leader == null && !follower.showWhenUnlinked) return;
+    final transform = follower.getCurrentTransform();
+    // ignore: invalid_use_of_protected_member
+    if (follower.layer == null) _scope._sawUncomposited = true;
+    _scope._followers[follower] = transform;
+    _hasher.addInt(41);
+    for (final v in transform.storage) {
+      _hasher.addDouble(v);
+    }
+    final child = follower.child;
+    if (child == null) return;
+    final c = canvas;
+    c.save();
+    c.translate(offset.dx, offset.dy);
+    c.transform(transform.storage);
+    final prevBase = _base;
+    // translation only, as glass assumes between itself and the scope
+    _base =
+        prevBase +
+        offset +
+        Offset(transform.storage[12], transform.storage[13]);
+    try {
+      paintChild(child, Offset.zero);
+    } finally {
+      _base = prevBase;
+      c.restore();
     }
   }
 
@@ -848,8 +888,8 @@ class _GlassCaptureContext extends PaintingContext {
       painter(this, offset);
       canvas.restore();
     } else {
-      // unknown semantics (Follower, custom layers): keep the content,
-      // recapture every frame
+      // unknown semantics (custom layers): keep the content, recapture every
+      // frame
       _hasher.poison();
       painter(this, offset);
     }
@@ -1194,6 +1234,7 @@ class RenderGlassScope extends RenderProxyBox {
       _hashValid = false;
       _boundaries.clear();
       _boundarySigs.clear();
+      _followers.clear();
     }
     // containers switch between direct draws and pushed layers
     for (final c in _containers) {
@@ -1262,6 +1303,10 @@ class RenderGlassScope extends RenderProxyBox {
   final Map<RenderObject, (int, int)> _boundarySigs = {};
   bool _watcherArmed = false;
 
+  /// Followers the capture replayed, with the transform each was replayed
+  /// at; the watcher recaptures once one composites somewhere else.
+  final Map<RenderFollowerLayer, Matrix4> _followers = {};
+
   /// Set when the capture inlined a boundary that had not composited yet (its
   /// layer was null, so a composited effect like opacity couldn't be applied);
   /// the boundary composites later in the same frame, so one post-frame
@@ -1269,7 +1314,7 @@ class RenderGlassScope extends RenderProxyBox {
   bool _sawUncomposited = false;
 
   void _armBoundaryWatcher() {
-    if (_watcherArmed || _boundaries.isEmpty) return;
+    if (_watcherArmed || (_boundaries.isEmpty && _followers.isEmpty)) return;
     _watcherArmed = true;
     SchedulerBinding.instance.addPostFrameCallback(_checkBoundaries);
   }
@@ -1290,6 +1335,11 @@ class RenderGlassScope extends RenderProxyBox {
       _boundarySigs[b] = sig;
       final p = prev[b];
       if (p != null && p != sig) changed = true;
+    }
+    for (final MapEntry(key: follower, value: replayed) in _followers.entries) {
+      if (follower.attached && follower.getCurrentTransform() != replayed) {
+        changed = true;
+      }
     }
     // A no-op recapture (unchanged hash) costs a re-record, never a raster,
     // so a false positive is cheap; a miss would leave the glass stale.
@@ -1572,6 +1622,7 @@ class RenderGlassScope extends RenderProxyBox {
     _capturing = true;
     _clearEntries();
     _boundaries.clear();
+    _followers.clear();
     _sawUncomposited = false;
     final OffsetLayer captureLayer = OffsetLayer();
     // Fold the scope geometry: identical draw commands at a new size or DPR
@@ -1688,6 +1739,7 @@ class RenderGlassScope extends RenderProxyBox {
     _captureLayer = null;
     _boundaries.clear();
     _boundarySigs.clear();
+    _followers.clear();
     super.dispose();
   }
 
