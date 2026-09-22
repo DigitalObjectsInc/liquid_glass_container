@@ -1,3 +1,30 @@
+# 0.1.1
+
+- Fix editable text (and any subtree behind a `CompositedTransformTarget`,
+  `CompositedTransformFollower`, or `ShaderMask`) rendering displaced on screen
+  while inside a capture-mode `GlassBackdropScope`. The backdrop capture walk
+  ran the render objects' paint with scope-relative offsets, and paints that
+  mutate their retained live layer in place (`LeaderLayer.offset`,
+  `ShaderMaskLayer.maskRect`, ...) left those offsets in the live layer tree,
+  which a clean repaint boundary then re-composited as-is. The capture now
+  hides a render object's retained layer for the duration of its paint, so the
+  paint builds a throwaway instead and the live layer is never touched. Seen
+  as "blank/displaced `TextField`" on skwasm, but present on every target in
+  capture mode (CanvasKit defaults to the `BackdropFilter` fallback).
+- Fix repaint boundaries being captured at their scope offset instead of at
+  `Offset.zero` under a translation, as the framework paints them. Boundaries
+  that draw at the canvas origin (`RenderEditable`'s caret and selection
+  painters) were displaced inside the refraction.
+- Composition callbacks registered during the capture walk
+  (`EditableText`'s IME size/transform updates) are routed to the scope's
+  live layer instead of the off-screen capture layer.
+- `LeaderLayer` content is captured inline with its offset instead of
+  poisoning the frame hash, so a focused `TextField` under glass no longer
+  forces a recapture and re-raster on every frame.
+- `GlassRenderMode.auto` is documented per target: `capture` everywhere,
+  including `--wasm` (skwasm) web builds; `backdropFilter` only on
+  JavaScript (CanvasKit) web builds.
+
 # 0.1.0
 
 Initial release.

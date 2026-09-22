@@ -66,7 +66,7 @@ All units follow Flutter conventions: logical px, 0..1 fractions, radians, y-dow
 More options:
 
 - `LiquidGlassContainer.precache()` loads the shaders before the first build, so the first frame is not blank. Call `WidgetsFlutterBinding.ensureInitialized()` first if you call it before `runApp`.
-- `GlassBackdropScope.renderMode` selects the pipeline. The default, `auto`, uses the full capture pipeline everywhere except CanvasKit web builds. Those get the `BackdropFilter` fallback, because each capture there is a slow synchronous GPU readback. `GlassBackdropScope.renderModeOf(context)` returns the resolved mode.
+- `GlassBackdropScope.renderMode` selects the pipeline. The default, `auto`, uses the full capture pipeline on Android, iOS, macOS, Windows, Linux, and `--wasm` (skwasm) web builds. JavaScript (CanvasKit) web builds get the `BackdropFilter` fallback, because each capture there is a slow synchronous GPU readback. `GlassBackdropScope.renderModeOf(context)` returns the resolved mode.
 - The `example/` folder contains a full playground: every parameter on sliders, cursor-follow glass with spring physics, and a glass-on-glass test pane.
 
 ## Drawbacks

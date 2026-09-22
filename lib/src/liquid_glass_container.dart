@@ -601,7 +601,9 @@ class _HashingCanvas implements Canvas {
 /// the consumers of the capture, not part of it), records everything else
 /// through a [_HashingCanvas] for change detection, and inlines repaint
 /// boundaries and common layer effects so the capture is a self-contained
-/// recording that never borrows layers from the live tree.
+/// recording that never borrows, mutates, or registers on layers of the
+/// live tree. The walk runs after the live paint of every clean boundary
+/// below the scope, so any live-tree side effect would stick on screen.
 class _GlassCaptureContext extends PaintingContext {
   _GlassCaptureContext(
     super.layer,
@@ -617,6 +619,12 @@ class _GlassCaptureContext extends PaintingContext {
   /// False while recording a pane's child: nested glass is skipped silently
   /// instead of registered (the registry is built by the main capture walk).
   final bool registerGlass;
+
+  /// Scope-logical position of the canvas origin: the sum of the offsets of
+  /// the repaint boundaries being inlined (each is painted at [Offset.zero]
+  /// under a canvas translation, as the framework does inside its
+  /// OffsetLayer). Offsets handed to [paintChild] are relative to it.
+  Offset _base = Offset.zero;
 
   Canvas? _inner;
   _HashingCanvas? _wrapped;
@@ -639,14 +647,29 @@ class _GlassCaptureContext extends PaintingContext {
         _hasher,
         _scope,
         registerGlass: registerGlass,
-      );
+      ).._base = _base;
+
+  @override
+  VoidCallback addCompositionCallback(CompositionCallback callback) {
+    // The capture layer is composited off-screen, only when the recording
+    // changed, and disposed without notice; a callback registered on it
+    // never sees the live scene. Callers register once, on whichever context
+    // paints them first (EditableText's IME size/transform updates ride on
+    // this), so route it to the scope's live layer, an ancestor of everything
+    // the capture inlines.
+    // ignore: invalid_use_of_protected_member
+    final live = _scope.layer;
+    return live == null
+        ? super.addCompositionCallback(callback)
+        : live.addCompositionCallback(callback);
+  }
 
   @override
   void paintChild(RenderObject child, Offset offset) {
     if (child is RenderLiquidGlassContainer) {
       // Glass never enters the backdrop, but the visit builds the paint-order
       // registry that drives glass-through-glass compositing.
-      if (registerGlass) _scope._registerGlass(child, offset);
+      if (registerGlass) _scope._registerGlass(child, _base + offset);
       return;
     }
     if (child.isRepaintBoundary) {
@@ -665,27 +688,62 @@ class _GlassCaptureContext extends PaintingContext {
       // ignore: invalid_use_of_protected_member
       final boundaryLayer = child.layer;
       if (boundaryLayer == null) _scope._sawUncomposited = true;
-      if (boundaryLayer is OpacityLayer) {
-        final alpha = boundaryLayer.alpha ?? 255;
-        _hasher.addInt(alpha);
-        canvas.saveLayer(null, Paint()..color = Color.fromARGB(alpha, 0, 0, 0));
-        child.paint(this, offset);
-        canvas.restore();
-      } else if (boundaryLayer is ImageFilterLayer &&
-          boundaryLayer.imageFilter != null) {
-        _hasher.addInt(identityHashCode(boundaryLayer.imageFilter));
-        canvas.saveLayer(
-          null,
-          Paint()..imageFilter = boundaryLayer.imageFilter,
-        );
-        child.paint(this, offset);
-        canvas.restore();
-      } else {
-        child.paint(this, offset);
+      // The framework always paints a boundary at Offset.zero inside its
+      // OffsetLayer, and boundaries may rely on it (RenderEditable's caret
+      // painter draws at the canvas origin): translate, don't pass the offset.
+      final c = canvas;
+      c.save();
+      c.translate(offset.dx, offset.dy);
+      final prevBase = _base;
+      _base = prevBase + offset;
+      try {
+        if (boundaryLayer is OpacityLayer) {
+          final alpha = boundaryLayer.alpha ?? 255;
+          _hasher.addInt(alpha);
+          c.saveLayer(null, Paint()..color = Color.fromARGB(alpha, 0, 0, 0));
+          child.paint(this, Offset.zero);
+          c.restore();
+        } else if (boundaryLayer is ImageFilterLayer &&
+            boundaryLayer.imageFilter != null) {
+          _hasher.addInt(identityHashCode(boundaryLayer.imageFilter));
+          c.saveLayer(null, Paint()..imageFilter = boundaryLayer.imageFilter);
+          child.paint(this, Offset.zero);
+          c.restore();
+        } else {
+          child.paint(this, Offset.zero);
+        }
+      } finally {
+        _base = prevBase;
+        c.restore();
       }
       return;
     }
-    super.paintChild(child, offset);
+    // A render object's retained `layer` (LeaderLayer, FollowerLayer,
+    // ShaderMaskLayer, ...) is mutated in place by its paint — offset, link,
+    // maskRect — before being pushed. That layer is live in the on-screen
+    // tree, and a clean boundary re-composites it as-is, so a mutation made
+    // with this walk's offsets would displace what the screen shows
+    // (CompositedTransformTarget wraps every EditableText). Hide the layer
+    // for the duration: the paint builds a throwaway instead, which the push*
+    // overrides never adopt, and the live one goes back untouched. A former
+    // boundary's OffsetLayer is left alone; the base paintChild asserts on
+    // and clears it itself.
+    // ignore: invalid_use_of_protected_member
+    final live = child.layer;
+    if (live == null || live is OffsetLayer) {
+      super.paintChild(child, offset);
+      return;
+    }
+    final keep = LayerHandle<ContainerLayer>(live);
+    // ignore: invalid_use_of_protected_member
+    child.layer = null;
+    try {
+      super.paintChild(child, offset);
+    } finally {
+      // ignore: invalid_use_of_protected_member
+      child.layer = keep.layer; // drops the throwaway
+      keep.layer = null;
+    }
   }
 
   @override
@@ -782,9 +840,16 @@ class _GlassCaptureContext extends PaintingContext {
     } else if (childLayer is AnnotatedRegionLayer) {
       // pure metadata (system chrome, semantics): content only
       painter(this, offset);
+    } else if (childLayer is LeaderLayer) {
+      // position metadata for followers, plus a translation of its content
+      final o = childLayer.offset;
+      canvas.save();
+      canvas.translate(o.dx, o.dy);
+      painter(this, offset);
+      canvas.restore();
     } else {
-      // unknown semantics (Leader/Follower, custom layers): keep the
-      // content, recapture every frame
+      // unknown semantics (Follower, custom layers): keep the content,
+      // recapture every frame
       _hasher.poison();
       painter(this, offset);
     }
@@ -926,9 +991,17 @@ class _GlassCaptureContext extends PaintingContext {
 
 /// How [GlassBackdropScope] renders its glass panes.
 enum GlassRenderMode {
-  /// [capture] everywhere except CanvasKit web builds (dart2js —
-  /// `kIsWeb && !kIsWasm`), which get [backdropFilter]: there `toImageSync`
-  /// is a synchronous GPU readback, making the capture pipeline slow.
+  /// Per target:
+  ///
+  /// | Target | Resolves to |
+  /// |---|---|
+  /// | Android, iOS, macOS, Windows, Linux | [capture] |
+  /// | Web, `--wasm` (skwasm) | [capture] |
+  /// | Web, JavaScript (CanvasKit, `kIsWeb && !kIsWasm`) | [backdropFilter] |
+  ///
+  /// CanvasKit is the one target where `toImageSync` is a synchronous GPU
+  /// readback, which makes the capture pipeline slow there. Skwasm renders
+  /// pictures to images without a readback and keeps the full pipeline.
   auto,
 
   /// Full capture pipeline: real refraction, dispersion, and
