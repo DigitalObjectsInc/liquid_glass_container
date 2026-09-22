@@ -3,7 +3,7 @@ description: >-
   Liquid glass container widget with real refraction, dispersion, fresnel,
   glare, backdrop blur and shadow. Fast single-pass shader, all platforms
   including web.
-version: 0.1.1
+version: 0.1.2
 repository: https://github.com/DigitalObjectsInc/liquid_glass_container
 issue_tracker: https://github.com/DigitalObjectsInc/liquid_glass_container/issues
 topics:

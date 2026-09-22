@@ -1096,6 +1096,95 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a follower is captured where its leader put it', (tester) async {
+    await _setUp(tester);
+    final link = LayerLink();
+    var leaderAt = const Offset(100, 100);
+    late StateSetter setLeaderAt;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  const ColoredBox(color: Color(0xFFFFFFFF)),
+                  StatefulBuilder(
+                    builder: (context, setState) {
+                      setLeaderAt = setState;
+                      return Positioned(
+                        left: leaderAt.dx,
+                        top: leaderAt.dy,
+                        child: CompositedTransformTarget(
+                          link: link,
+                          child: const SizedBox(width: 200, height: 200),
+                        ),
+                      );
+                    },
+                  ),
+                  // laid out far from the glass: only its leader brings it
+                  // under the pane
+                  Positioned(
+                    left: 400,
+                    top: 400,
+                    child: CompositedTransformFollower(
+                      link: link,
+                      child: const ColoredBox(
+                        color: Color(0xFF000000),
+                        child: SizedBox(width: 200, height: 200),
+                      ),
+                    ),
+                  ),
+                  const Positioned(
+                    left: 100,
+                    top: 100,
+                    child: RepaintBoundary(
+                      child: LiquidGlassContainer(width: 200, height: 200),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    Future<int> lum(int x, int y) async {
+      final boundary = tester.renderObject<RenderRepaintBoundary>(
+        find.byType(RepaintBoundary).first,
+      );
+      final image = await tester.runAsync(() => boundary.toImage());
+      final data = await tester.runAsync(
+        () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
+      );
+      return data!.getUint8((y * image!.width + x) * 4);
+    }
+
+    expect(await lum(200, 200), lessThan(50));
+
+    // a replayed follower is ordinary content: nothing changes, nothing is
+    // recaptured
+    final scope = _scope(tester);
+    final genSettled = scope.generation;
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(scope.generation, genSettled);
+    expect(tester.binding.hasScheduledFrame, isFalse);
+
+    setLeaderAt(() => leaderAt = const Offset(350, 350));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+    expect(await lum(200, 200), greaterThan(200));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('in-place path mutation invalidates the capture', (tester) async {
     await _setUp(tester);
     final path = Path()..addRect(const Rect.fromLTWH(100, 100, 100, 100));
