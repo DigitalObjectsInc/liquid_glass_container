@@ -1,3 +1,19 @@
+# 0.1.3
+
+- Panes under a scale transform (`Transform.scale`, `FittedBox`, or a scale
+  anywhere between the pane and its scope) refract the backdrop where they are
+  drawn. The shader mapped each fragment's pane-local offset to the backdrop
+  unscaled, so a pane at 0.7 showed content from 1/0.7 as far away: ghosts of
+  nearby controls inside the glass and a horizon at the wrong height. Lengths
+  local to the pane (refraction reach, blur radius) now scale with it.
+- Glass stacked on a scaled pane composites it at the scaled size. The capture
+  walk registered panes from the repaint boundary and follower translations
+  only, ignoring transforms pushed on the canvas, and recorded the lower
+  pane's glass and child at full size, so an upper pane (a menu, a settings
+  panel, drag feedback) showed the pane below oversized and shifted.
+- Output under translation-only transforms is unchanged. Rotation, skew, and
+  mirroring stay unsupported.
+
 # 0.1.2
 
 - `CompositedTransformFollower` content (dropdown menus, text selection

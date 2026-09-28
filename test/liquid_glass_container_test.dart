@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -98,6 +99,74 @@ RenderGlassScope _scope(WidgetTester tester) =>
 
 _HarnessState _harness(WidgetTester tester) =>
     tester.state<_HarnessState>(find.byType(_Harness));
+
+/// Red left of [splitX] (logical px), blue right of it.
+class _SplitPainter extends CustomPainter {
+  _SplitPainter(this.splitX);
+
+  final double splitX;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, splitX, size.height),
+      Paint()..color = const Color(0xFFFF0000),
+    );
+    canvas.drawRect(
+      Rect.fromLTRB(splitX, 0, size.width, size.height),
+      Paint()..color = const Color(0xFF0000FF),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_SplitPainter oldDelegate) {
+    return oldDelegate.splitX != splitX;
+  }
+}
+
+/// Glass that passes the backdrop through unchanged: no refraction, blur,
+/// tint, or shadow.
+const _clearGlass = LiquidGlassSettings(
+  thickness: 0,
+  blurRadius: 0,
+  tint: Color(0x00000000),
+  shadowIntensity: 0,
+);
+
+/// RGBA of the first [RepaintBoundary], at logical resolution.
+class _Snapshot {
+  _Snapshot(this.data, this.width);
+
+  final ByteData data;
+  final int width;
+
+  int red(int x, int y) {
+    return data.getUint8((y * width + x) * 4);
+  }
+
+  int blue(int x, int y) {
+    return data.getUint8((y * width + x) * 4 + 2);
+  }
+}
+
+Future<_Snapshot> _snapshot(WidgetTester tester) async {
+  final boundary = tester.renderObject<RenderRepaintBoundary>(
+    find.byType(RepaintBoundary).first,
+  );
+  final image = await tester.runAsync(() {
+    return boundary.toImage();
+  });
+  if (image == null) {
+    fail('no snapshot image');
+  }
+  final data = await tester.runAsync(() {
+    return image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  });
+  if (data == null) {
+    fail('no snapshot data');
+  }
+  return _Snapshot(data, image.width);
+}
 
 void main() {
   testWidgets('glass renders without errors (strong params)', (tester) async {
@@ -1471,5 +1540,213 @@ void main() {
       ),
     );
     expect(tester.takeException(), isFlutterError);
+  });
+
+  testWidgets('translation-only panes register and paint unscaled', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: _CheckerboardPainter()),
+                const Positioned(
+                  left: 30.25,
+                  top: 40.5,
+                  child: LiquidGlassContainer(width: 120, height: 80),
+                ),
+                const Positioned(
+                  left: 100,
+                  top: 60,
+                  child: RepaintBoundary(
+                    child: Padding(
+                      padding: EdgeInsets.only(left: 11, top: 7),
+                      child: LiquidGlassContainer(width: 150, height: 90),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final scope = _scope(tester);
+    // dpr 2: exactly the offset and size in device px
+    expect(scope.debugGlassRects, [
+      const Rect.fromLTWH(60.5, 81, 240, 160),
+      const Rect.fromLTWH(222, 134, 300, 180),
+    ]);
+    final panes = tester
+        .renderObjectList<RenderLiquidGlassContainer>(
+          find.byType(LiquidGlassContainer),
+        )
+        .toList();
+    for (var index = 0; index < panes.length; index++) {
+      expect(panes[index].debugPaintedScale, const Offset(1, 1));
+      expect(panes[index].debugPaintedGlassPx, scope.debugGlassRects[index]);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('scaled pane registers and paints its scaled footprint', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: _CheckerboardPainter()),
+                Positioned(
+                  left: 100,
+                  top: 100,
+                  child: Transform.scale(
+                    scale: 0.5,
+                    alignment: Alignment.topLeft,
+                    // a boundary under the scale: its translation composes
+                    // after the scale
+                    child: const RepaintBoundary(
+                      child: Padding(
+                        padding: EdgeInsets.only(left: 40, top: 20),
+                        child: LiquidGlassContainer(width: 200, height: 120),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final scope = _scope(tester);
+    // origin (100 + 40 * 0.5, 100 + 20 * 0.5) and half the size, at dpr 2
+    const footprint = Rect.fromLTWH(240, 220, 200, 120);
+    expect(scope.debugGlassRects, [footprint]);
+    final pane = tester.renderObject<RenderLiquidGlassContainer>(
+      find.byType(LiquidGlassContainer),
+    );
+    expect(pane.debugPaintedGlassPx, footprint);
+    expect(pane.debugPaintedScale, const Offset(0.5, 0.5));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('scaled pane samples the backdrop where it is drawn', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CustomPaint(painter: _SplitPainter(150)),
+                  // drawn over 100..200 x 100..200; the split runs through it
+                  Positioned(
+                    left: 100,
+                    top: 100,
+                    child: Transform.scale(
+                      scale: 0.5,
+                      alignment: Alignment.topLeft,
+                      child: const LiquidGlassContainer(
+                        width: 200,
+                        height: 200,
+                        settings: _clearGlass,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // clear glass shows the backdrop right beneath it: red left of the split,
+    // blue right of it (unscaled sampling would read blue from x 180 at 140)
+    expect(snapshot.red(140, 150), greaterThan(200));
+    expect(snapshot.blue(140, 150), lessThan(50));
+    expect(snapshot.red(160, 150), lessThan(50));
+    expect(snapshot.blue(160, 150), greaterThan(200));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('scaled lower pane shows through an upper pane at its size', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  const ColoredBox(color: Color(0xFFFFFFFF)),
+                  // red child drawn over 100..200 x 100..200
+                  Positioned(
+                    left: 100,
+                    top: 100,
+                    child: Transform.scale(
+                      scale: 0.5,
+                      alignment: Alignment.topLeft,
+                      child: LiquidGlassContainer(
+                        width: 200,
+                        height: 200,
+                        settings: _clearGlass,
+                        child: Container(color: const Color(0xFFFF0000)),
+                      ),
+                    ),
+                  ),
+                  const Positioned(
+                    left: 150,
+                    top: 100,
+                    child: LiquidGlassContainer(
+                      width: 200,
+                      height: 200,
+                      settings: _clearGlass,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final scope = _scope(tester);
+    expect(scope.debugGlassRects, [
+      const Rect.fromLTWH(200, 200, 200, 200),
+      const Rect.fromLTWH(300, 200, 400, 400),
+    ]);
+    final snapshot = await _snapshot(tester);
+    // through the upper pane: the scaled child where it is drawn ...
+    expect(snapshot.red(175, 150), greaterThan(200));
+    expect(snapshot.blue(175, 150), lessThan(50));
+    // ... and white past it, where the child would reach unscaled
+    expect(snapshot.red(250, 150), greaterThan(200));
+    expect(snapshot.blue(250, 150), greaterThan(200));
+    expect(tester.takeException(), isNull);
   });
 }
