@@ -620,11 +620,25 @@ class _GlassCaptureContext extends PaintingContext {
   /// instead of registered (the registry is built by the main capture walk).
   final bool registerGlass;
 
-  /// Scope-logical position of the canvas origin: the sum of the offsets of
-  /// the repaint boundaries being inlined (each is painted at [Offset.zero]
-  /// under a canvas translation, as the framework does inside its
-  /// OffsetLayer). Offsets handed to [paintChild] are relative to it.
-  Offset _base = Offset.zero;
+  /// Canvas space to scope-logical space: the translations of the repaint
+  /// boundaries being inlined (each is painted at [Offset.zero] under a
+  /// canvas translation, as the framework does inside its OffsetLayer), the
+  /// replayed follower transforms, and the transforms pushed on the canvas.
+  /// Offsets handed to [paintChild] are in canvas space. Never mutated in
+  /// place: child contexts share it.
+  Matrix4 _base = Matrix4.identity();
+
+  /// Paints [paint] with [_base] advanced by [transform], mirroring the
+  /// canvas transform the caller applies around it.
+  void _withBase(Matrix4 transform, VoidCallback paint) {
+    final prevBase = _base;
+    _base = prevBase.multiplied(transform);
+    try {
+      paint();
+    } finally {
+      _base = prevBase;
+    }
+  }
 
   Canvas? _inner;
   _HashingCanvas? _wrapped;
@@ -669,7 +683,15 @@ class _GlassCaptureContext extends PaintingContext {
     if (child is RenderLiquidGlassContainer) {
       // Glass never enters the backdrop, but the visit builds the paint-order
       // registry that drives glass-through-glass compositing.
-      if (registerGlass) _scope._registerGlass(child, _base + offset);
+      if (registerGlass) {
+        final base = _base;
+        _scope._registerGlass(
+          child,
+          MatrixUtils.transformPoint(base, offset),
+          // axis-aligned scale only; rotation and skew are unsupported
+          Offset(base.storage[0], base.storage[5]),
+        );
+      }
       return;
     }
     if (child.isRepaintBoundary) {
@@ -695,7 +717,9 @@ class _GlassCaptureContext extends PaintingContext {
       c.save();
       c.translate(offset.dx, offset.dy);
       final prevBase = _base;
-      _base = prevBase + offset;
+      _base = prevBase.multiplied(
+        Matrix4.translationValues(offset.dx, offset.dy, 0),
+      );
       try {
         if (boundaryLayer is OpacityLayer) {
           final alpha = boundaryLayer.alpha ?? 255;
@@ -773,11 +797,9 @@ class _GlassCaptureContext extends PaintingContext {
     c.translate(offset.dx, offset.dy);
     c.transform(transform.storage);
     final prevBase = _base;
-    // translation only, as glass assumes between itself and the scope
-    _base =
-        prevBase +
-        offset +
-        Offset(transform.storage[12], transform.storage[13]);
+    _base = prevBase.multiplied(
+      Matrix4.translationValues(offset.dx, offset.dy, 0),
+    )..multiply(transform);
     try {
       paintChild(child, Offset.zero);
     } finally {
@@ -865,10 +887,12 @@ class _GlassCaptureContext extends PaintingContext {
       canvas.clipPath(childLayer.clipPath!);
       painter(this, offset);
       canvas.restore();
-    } else if (childLayer is TransformLayer && childLayer.transform != null) {
+    } else if (childLayer case TransformLayer(:final Matrix4 transform)) {
       canvas.save();
-      canvas.transform(childLayer.transform!.storage);
-      painter(this, offset);
+      canvas.transform(transform.storage);
+      _withBase(transform, () {
+        painter(this, offset);
+      });
       canvas.restore();
     } else if (childLayer is BackdropFilterLayer) {
       // A backdrop effect cannot replay into a flat recording: keep the
@@ -1009,7 +1033,13 @@ class _GlassCaptureContext extends PaintingContext {
     PaintingContextCallback painter, {
     TransformLayer? oldLayer,
   }) {
-    super.pushTransform(false, offset, transform, painter);
+    // the effective transform the base implementation applies to the canvas
+    final effective = Matrix4.translationValues(offset.dx, offset.dy, 0)
+      ..multiply(transform)
+      ..translateByDouble(-offset.dx, -offset.dy, 0, 1);
+    _withBase(effective, () {
+      super.pushTransform(false, offset, transform, painter);
+    });
     return TransformLayer(transform: transform);
   }
 
@@ -1412,17 +1442,33 @@ class RenderGlassScope extends RenderProxyBox {
       final paneOrigin = e.glassPx.topLeft / _devicePixelRatio;
       final childOffset = (childBox.parentData! as BoxParentData).offset;
       final clip = e.container._clipBehavior;
-      if (clip == Clip.none) {
-        ctx.paintChild(childBox, paneOrigin + childOffset);
+      void paintPane(PaintingContext paneContext, Offset origin) {
+        if (clip == Clip.none) {
+          paneContext.paintChild(childBox, origin + childOffset);
+        } else {
+          // same clip as the live child paint (_paintChild)
+          paneContext.pushClipPath(
+            false,
+            origin,
+            Offset.zero & e.container.size,
+            e.container._glassPathFor(e.container.size),
+            (c, o) => c.paintChild(childBox, o + childOffset),
+            clipBehavior: clip,
+          );
+        }
+      }
+
+      final scale = e.scale;
+      if (scale == _unscaled) {
+        paintPane(ctx, paneOrigin);
       } else {
-        // same clip as the live child paint (_paintChild)
-        ctx.pushClipPath(
+        // the child lands where the scene draws it: scaled about the pane's
+        // top-left
+        ctx.pushTransform(
           false,
           paneOrigin,
-          Offset.zero & e.container.size,
-          e.container._glassPathFor(e.container.size),
-          (c, o) => c.paintChild(childBox, o + childOffset),
-          clipBehavior: clip,
+          Matrix4.diagonal3Values(scale.dx, scale.dy, 1),
+          paintPane,
         );
       }
       // ignore: invalid_use_of_protected_member
@@ -1457,20 +1503,39 @@ class RenderGlassScope extends RenderProxyBox {
     return out;
   }
 
-  void _registerGlass(RenderLiquidGlassContainer c, Offset offsetLogical) {
+  /// Scale of a pane drawn under translation-only transforms.
+  static const Offset _unscaled = Offset(1, 1);
+
+  /// Registers [c], drawn at [offsetLogical] (scope-logical) with the
+  /// axis-aligned [scale] between its local space and the scope.
+  void _registerGlass(
+    RenderLiquidGlassContainer c,
+    Offset offsetLogical,
+    Offset scale,
+  ) {
     final dpr = _devicePixelRatio;
-    final glassPx = (offsetLogical * dpr) & c.size * dpr;
+    final glassPx =
+        (offsetLogical * dpr) &
+        Size(c.size.width * scale.dx * dpr, c.size.height * scale.dy * dpr);
     // Overlap-test bounds are deliberately tight (glass body + AA margin, and
     // for sampling the blur smear): the theoretical refraction reach covers a
     // ~1px rim band at extreme angles — not worth per-frame compositing for
     // panes that merely sit near each other.
     final paintBounds = glassPx.inflate(2 * dpr);
     final sampleBounds = glassPx.inflate(
-      8 * dpr + 2.0 * c.settings.blurRadius! * dpr,
+      (8 * dpr + 2.0 * c.settings.blurRadius! * dpr) *
+          RenderLiquidGlassContainer._reachScale(scale),
     );
     _entryIndex[c] = _entries.length;
     _entries.add(
-      _GlassEntry(c, glassPx, paintBounds, sampleBounds, c._stateHash(glassPx)),
+      _GlassEntry(
+        c,
+        glassPx,
+        scale,
+        paintBounds,
+        sampleBounds,
+        c._stateHash(glassPx, scale),
+      ),
     );
   }
 
@@ -1766,6 +1831,7 @@ class _GlassEntry {
   _GlassEntry(
     this.container,
     this.glassPx,
+    this.scale,
     this.paintBounds,
     this.sampleBounds,
     this.stateHash,
@@ -1773,6 +1839,9 @@ class _GlassEntry {
 
   final RenderLiquidGlassContainer container;
   final Rect glassPx;
+
+  /// Axis-aligned scale from the pane's local space to the scope.
+  final Offset scale;
   final Rect paintBounds;
   final Rect sampleBounds;
   final int stateHash;
@@ -2327,11 +2396,14 @@ class RenderLiquidGlassContainer extends RenderBox
       (scope.size.height * dpr).ceilToDouble(),
     );
 
-    // Container origin in scope device px (assumes translation-only transforms
-    // between container and scope).
+    // Container origin in scope device px, and the axis-aligned scale between
+    // container and scope (rotation and skew are unsupported).
     final toScope = getTransformTo(scope);
     final originScope = MatrixUtils.transformPoint(toScope, Offset.zero) * dpr;
-    final glassPx = originScope & size * dpr;
+    final scale = Offset(toScope.storage[0], toScope.storage[5]);
+    final glassPx =
+        originScope &
+        Size(size.width * scale.dx * dpr, size.height * scale.dy * dpr);
     final entry = scope._entryOf(this);
     final lower = scope._lowerIntersecting(this);
     final lowerHash = RenderGlassScope._lowerStatesHash(lower);
@@ -2344,11 +2416,13 @@ class RenderLiquidGlassContainer extends RenderBox
 
     // Sampled area (glass + refraction/dispersion/blur reach); lower panes
     // whose output lands inside it must show through this one.
+    // Lengths are local to the pane, so the reach and the blur scale with it.
+    final reachScale = _reachScale(scale);
     final needed = glassPx
-        .inflate(_reachFor(_settings, dpr).ceilToDouble())
+        .inflate(_reachFor(_settings, dpr * reachScale).ceilToDouble())
         .intersect(scopePx);
     // texture cache and shader blur operate in integer device px
-    final devBlur = (_settings.blurRadius! * dpr).round();
+    final devBlur = (_settings.blurRadius! * dpr * reachScale).round();
 
     final ui.Image sharp;
     final ui.Image blurred;
@@ -2380,6 +2454,7 @@ class RenderLiquidGlassContainer extends RenderBox
       dpr,
       offset,
       originScope,
+      scale,
       texRect,
       sharp,
       blurred,
@@ -2392,24 +2467,39 @@ class RenderLiquidGlassContainer extends RenderBox
     if (entry != null && scope._needsPicture(this)) {
       final originLogical = originScope / dpr;
       final ps = _compShader ??= _GlassShaders.main.fragmentShader();
+      final rec = ui.PictureRecorder();
+      final recCanvas = Canvas(rec);
+      var drawOrigin = originLogical;
+      if (scale != RenderGlassScope._unscaled) {
+        // draw in local space under the pane's scale, as the scene does
+        recCanvas.translate(originLogical.dx, originLogical.dy);
+        recCanvas.scale(scale.dx, scale.dy);
+        drawOrigin = Offset.zero;
+      }
       _setUniforms(
         ps,
         scopePx,
         dpr,
-        originLogical,
+        drawOrigin,
         originScope,
+        scale,
         texRect,
         sharp,
         blurred,
         shadowIntensity,
       );
-      final rec = ui.PictureRecorder();
-      _paintGlass(Canvas(rec), originLogical, ps, shadowIntensity);
+      _paintGlass(recCanvas, drawOrigin, ps, shadowIntensity);
       entry.picture?.dispose();
       entry.picture = rec.endRecording();
     }
 
     _paintChild(context, offset);
+  }
+
+  /// Factor for lengths local to a pane drawn at [scale]: the larger axis,
+  /// so reach estimates stay upper bounds under a non-uniform scale.
+  static double _reachScale(Offset scale) {
+    return math.max(scale.dx.abs(), scale.dy.abs());
   }
 
   /// Max sampling offset in device px: refraction (70.71 * cot(asin(1/n)) *
@@ -2425,11 +2515,12 @@ class RenderLiquidGlassContainer extends RenderBox
 
   /// Everything that determines this pane's rendered output (given the same
   /// backdrop); folded into the scope's glass epoch.
-  int _stateHash(Rect glassPx) => Object.hash(
+  int _stateHash(Rect glassPx, Offset scale) => Object.hash(
     glassPx.left,
     glassPx.top,
     glassPx.right,
     glassPx.bottom,
+    scale,
     _settings,
   );
 
@@ -2486,6 +2577,7 @@ class RenderLiquidGlassContainer extends RenderBox
     double dpr,
     Offset drawOrigin,
     Offset originScope,
+    Offset scale,
     Rect texRect,
     ui.Image sharp,
     ui.Image blurred,
@@ -2502,6 +2594,8 @@ class RenderLiquidGlassContainer extends RenderBox
     s.setFloat(i++, size.height);
     s.setFloat(i++, originScope.dx); // u_originScope
     s.setFloat(i++, originScope.dy);
+    s.setFloat(i++, scale.dx); // u_scale
+    s.setFloat(i++, scale.dy);
     s.setFloat(i++, _pathR); // u_shapeRadius (computed by _glassPathFor)
     s.setFloat(i++, cfg.shape!.roundness); // u_shapeRoundness
     final tint = cfg.tint!;

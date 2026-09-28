@@ -24,6 +24,11 @@ uniform float u_dpr;
 uniform vec2 u_drawOrigin;   // glass rect top-left in canvas space, logical px
 uniform vec2 u_size;         // glass size, logical px
 uniform vec2 u_originScope;  // glass rect top-left in scope space, device px
+// Axis-aligned scale from the glass's local space to scope space (1 under
+// translation-only transforms). The rect is drawn in local space and the
+// canvas scales it on screen, so local offsets are scaled before they
+// address the scope-space backdrop.
+uniform vec2 u_scale;
 uniform float u_shapeRadius; // logical px
 uniform float u_shapeRoundness;
 uniform vec4 u_tint;
@@ -92,7 +97,7 @@ void main() {
   vec2 local = FlutterFragCoord().xy - u_drawOrigin; // logical px in the rect
   vec2 pDev = local * u_dpr;                         // glass-local device px
   vec2 p = pDev - u_size * u_dpr * 0.5;              // centered device px
-  vec2 fragScopeDev = u_originScope + pDev;          // scope device px
+  vec2 fragScopeDev = u_originScope + pDev * u_scale; // scope device px
   float res1xy = u_scopeRes.y / u_dpr;
 
   float merged = mainSDF(p);
@@ -124,8 +129,9 @@ void main() {
       // reference refOffset folded to device px (isotropic; the aspect factor
       // in the original exactly cancels the per-axis uv scale)
       vec2 refOffset = -normal * edgeFactor * 0.05 * u_dpr * u_scopeRes.y;
+      // the offset is local, like the shape: it reaches the scope scaled
       vec4 blurredPixel = getTextureDispersion(
-        fragScopeDev, blurMixRate, refOffset, u_refDispersion);
+        fragScopeDev, blurMixRate, refOffset * u_scale, u_refDispersion);
       blurredPixel.rgb -= vec3(shadowTerm(p + refOffset));
 
       // basic tint
