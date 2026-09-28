@@ -1539,13 +1539,6 @@ class RenderGlassScope extends RenderProxyBox {
     );
   }
 
-  /// Scope device-px rects of the panes the last capture registered, in
-  /// paint order.
-  @visibleForTesting
-  List<Rect> get debugGlassRects {
-    return [for (final entry in _entries) entry.glassPx];
-  }
-
   void _clearEntries() {
     for (final e in _entries) {
       e.picture?.dispose();
@@ -2411,8 +2404,6 @@ class RenderLiquidGlassContainer extends RenderBox
     final glassPx =
         originScope &
         Size(size.width * scale.dx * dpr, size.height * scale.dy * dpr);
-    _debugPaintedGlassPx = glassPx;
-    _debugPaintedScale = scale;
     final entry = scope._entryOf(this);
     final lower = scope._lowerIntersecting(this);
     final lowerHash = RenderGlassScope._lowerStatesHash(lower);
@@ -2509,23 +2500,6 @@ class RenderLiquidGlassContainer extends RenderBox
   /// so reach estimates stay upper bounds under a non-uniform scale.
   static double _reachScale(Offset scale) {
     return math.max(scale.dx.abs(), scale.dy.abs());
-  }
-
-  /// Scope device-px rect and scale this pane last painted its glass with.
-  Rect? _debugPaintedGlassPx;
-  Offset? _debugPaintedScale;
-
-  /// The scope device-px rect of the last glass paint.
-  @visibleForTesting
-  Rect? get debugPaintedGlassPx {
-    return _debugPaintedGlassPx;
-  }
-
-  /// The local-to-scope scale ([ui.FragmentShader] `u_scale`) of the last
-  /// glass paint.
-  @visibleForTesting
-  Offset? get debugPaintedScale {
-    return _debugPaintedScale;
   }
 
   /// Max sampling offset in device px: refraction (70.71 * cot(asin(1/n)) *

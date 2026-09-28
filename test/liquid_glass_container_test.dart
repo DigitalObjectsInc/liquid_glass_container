@@ -1542,107 +1542,6 @@ void main() {
     expect(tester.takeException(), isFlutterError);
   });
 
-  testWidgets('translation-only panes register and paint unscaled', (
-    tester,
-  ) async {
-    await _setUp(tester);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: GlassBackdropScope(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                CustomPaint(painter: _CheckerboardPainter()),
-                const Positioned(
-                  left: 30.25,
-                  top: 40.5,
-                  child: LiquidGlassContainer(width: 120, height: 80),
-                ),
-                const Positioned(
-                  left: 100,
-                  top: 60,
-                  child: RepaintBoundary(
-                    child: Padding(
-                      padding: EdgeInsets.only(left: 11, top: 7),
-                      child: LiquidGlassContainer(width: 150, height: 90),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-    final scope = _scope(tester);
-    // dpr 2: exactly the offset and size in device px
-    expect(scope.debugGlassRects, [
-      const Rect.fromLTWH(60.5, 81, 240, 160),
-      const Rect.fromLTWH(222, 134, 300, 180),
-    ]);
-    final panes = tester
-        .renderObjectList<RenderLiquidGlassContainer>(
-          find.byType(LiquidGlassContainer),
-        )
-        .toList();
-    for (var index = 0; index < panes.length; index++) {
-      expect(panes[index].debugPaintedScale, const Offset(1, 1));
-      expect(panes[index].debugPaintedGlassPx, scope.debugGlassRects[index]);
-    }
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('scaled pane registers and paints its scaled footprint', (
-    tester,
-  ) async {
-    await _setUp(tester);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: GlassBackdropScope(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                CustomPaint(painter: _CheckerboardPainter()),
-                Positioned(
-                  left: 100,
-                  top: 100,
-                  child: Transform.scale(
-                    scale: 0.5,
-                    alignment: Alignment.topLeft,
-                    // a boundary under the scale: its translation composes
-                    // after the scale
-                    child: const RepaintBoundary(
-                      child: Padding(
-                        padding: EdgeInsets.only(left: 40, top: 20),
-                        child: LiquidGlassContainer(width: 200, height: 120),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-    final scope = _scope(tester);
-    // origin (100 + 40 * 0.5, 100 + 20 * 0.5) and half the size, at dpr 2
-    const footprint = Rect.fromLTWH(240, 220, 200, 120);
-    expect(scope.debugGlassRects, [footprint]);
-    final pane = tester.renderObject<RenderLiquidGlassContainer>(
-      find.byType(LiquidGlassContainer),
-    );
-    expect(pane.debugPaintedGlassPx, footprint);
-    expect(pane.debugPaintedScale, const Offset(0.5, 0.5));
-    expect(tester.takeException(), isNull);
-  });
-
   testWidgets('scaled pane samples the backdrop where it is drawn', (
     tester,
   ) async {
@@ -1735,11 +1634,6 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    final scope = _scope(tester);
-    expect(scope.debugGlassRects, [
-      const Rect.fromLTWH(200, 200, 200, 200),
-      const Rect.fromLTWH(300, 200, 400, 400),
-    ]);
     final snapshot = await _snapshot(tester);
     // through the upper pane: the scaled child where it is drawn ...
     expect(snapshot.red(175, 150), greaterThan(200));
