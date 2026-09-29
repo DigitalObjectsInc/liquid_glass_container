@@ -1643,4 +1643,63 @@ void main() {
     expect(snapshot.blue(250, 150), greaterThan(200));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('downscaled blur spreads an edge by sigma = blurRadius / 3', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CustomPaint(painter: _SplitPainter(300)),
+                  const Positioned(
+                    left: 150,
+                    top: 150,
+                    child: LiquidGlassContainer(
+                      width: 300,
+                      height: 300,
+                      // 40 device px at dpr 2: blurred at a quarter size
+                      settings: LiquidGlassSettings(
+                        thickness: 0,
+                        blurRadius: 20,
+                        tint: Color(0x00000000),
+                        shadowIntensity: 0,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // 10%..90% of the red-to-blue step across the split, in logical px; a
+    // gaussian edge spans 2.56 sigma, 17 px at sigma 20 / 3 (a blur applied
+    // at the quarter-size texel scale would span about 4)
+    int? crossing(double fraction) {
+      for (var x = 250; x < 350; x++) {
+        if (snapshot.blue(x, 300) >= 255 * fraction) {
+          return x;
+        }
+      }
+      return null;
+    }
+
+    final from = crossing(0.1);
+    final to = crossing(0.9);
+    if (from == null || to == null) {
+      fail('no red-to-blue step across the split');
+    }
+    expect(to - from, inInclusiveRange(13, 21));
+    expect(tester.takeException(), isNull);
+  });
 }

@@ -1647,23 +1647,39 @@ class RenderGlassScope extends RenderProxyBox {
   @visibleForTesting
   int get debugBlurTextureCount => _blurTexs.length;
 
+  /// Downscales first, then blurs the small image drawn 1:1. One scaled
+  /// drawImageRect with the blur on its paint is not portable: Skia blurs in
+  /// destination space, Impeller in the source's texel space (the image stays
+  /// full-res under a 1/ds transform), so its sigma lands ds times too small.
   static ui.Image _blur(ui.Image src, int radius) {
     final ds = radius >= 12 ? 4.0 : (radius >= 4 ? 2.0 : 1.0);
     final sigma = math.max(radius / 3.0 / ds, 0.1);
     final w = (src.width / ds).ceil();
     final h = (src.height / ds).ceil();
-    final rec = ui.PictureRecorder();
-    Canvas(rec).drawImageRect(
-      src,
-      Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()),
-      Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()),
+    final small = ds == 1 ? src : _drawImage(src, w, h, Paint());
+    final img = _drawImage(
+      small,
+      w,
+      h,
       Paint()
-        ..filterQuality = FilterQuality.low
         ..imageFilter = ui.ImageFilter.blur(
           sigmaX: sigma,
           sigmaY: sigma,
           tileMode: TileMode.clamp,
         ),
+    );
+    if (!identical(small, src)) small.dispose();
+    return img;
+  }
+
+  /// Rasterizes all of [src] stretched to [w]x[h] with [paint].
+  static ui.Image _drawImage(ui.Image src, int w, int h, Paint paint) {
+    final rec = ui.PictureRecorder();
+    Canvas(rec).drawImageRect(
+      src,
+      Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()),
+      Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()),
+      paint..filterQuality = FilterQuality.low,
     );
     final pic = rec.endRecording();
     final img = pic.toImageSync(w, h);
