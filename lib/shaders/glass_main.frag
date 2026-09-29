@@ -62,12 +62,6 @@ out vec4 fragColor;
 // blurred one is just a lower-resolution raster of the same crop rect)
 vec2 toCrop(vec2 posDev) {
   vec2 uv = (posDev - u_cropOrigin) / u_cropSize;
-#ifdef IMPELLER_TARGET_OPENGLES
-  // GLES render targets are stored bottom-up; drawImage compensates but
-  // runtime-effect samplers get the raw texture. Both samplers are always
-  // toImageSync render targets, so unconditionally un-flip on this backend.
-  uv.y = 1.0 - uv.y;
-#endif
   return uv;
 }
 
