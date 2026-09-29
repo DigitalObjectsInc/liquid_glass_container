@@ -640,6 +640,25 @@ class _GlassCaptureContext extends PaintingContext {
     }
   }
 
+  /// Paints of the opacity and color-filter saveLayers the walk is inside,
+  /// outermost first. The scene applies them to glass panes and their
+  /// children too, so the registry keeps them for upper panes to replay
+  /// around a lower pane's output. Never mutated in place: child contexts
+  /// share it.
+  List<Paint> _layerPaints = const [];
+
+  /// Paints [paint] with [layerPaint] appended to [_layerPaints], mirroring
+  /// the saveLayer the caller applies around it.
+  void _withLayerPaint(Paint layerPaint, VoidCallback paint) {
+    final prevPaints = _layerPaints;
+    _layerPaints = [...prevPaints, layerPaint];
+    try {
+      paint();
+    } finally {
+      _layerPaints = prevPaints;
+    }
+  }
+
   Canvas? _inner;
   _HashingCanvas? _wrapped;
 
@@ -656,12 +675,14 @@ class _GlassCaptureContext extends PaintingContext {
   @override
   PaintingContext createChildContext(ContainerLayer childLayer, Rect bounds) =>
       _GlassCaptureContext(
-        childLayer,
-        bounds,
-        _hasher,
-        _scope,
-        registerGlass: registerGlass,
-      ).._base = _base;
+          childLayer,
+          bounds,
+          _hasher,
+          _scope,
+          registerGlass: registerGlass,
+        )
+        .._base = _base
+        .._layerPaints = _layerPaints;
 
   @override
   VoidCallback addCompositionCallback(CompositionCallback callback) {
@@ -690,6 +711,7 @@ class _GlassCaptureContext extends PaintingContext {
           MatrixUtils.transformPoint(base, offset),
           // axis-aligned scale only; rotation and skew are unsupported
           Offset(base.storage[0], base.storage[5]),
+          _layerPaints,
         );
       }
       return;
@@ -724,8 +746,11 @@ class _GlassCaptureContext extends PaintingContext {
         if (boundaryLayer is OpacityLayer) {
           final alpha = boundaryLayer.alpha ?? 255;
           _hasher.addInt(alpha);
-          c.saveLayer(null, Paint()..color = Color.fromARGB(alpha, 0, 0, 0));
-          child.paint(this, Offset.zero);
+          final layerPaint = Paint()..color = Color.fromARGB(alpha, 0, 0, 0);
+          c.saveLayer(null, layerPaint);
+          _withLayerPaint(layerPaint, () {
+            child.paint(this, Offset.zero);
+          });
           c.restore();
         } else if (boundaryLayer is ImageFilterLayer &&
             boundaryLayer.imageFilter != null) {
@@ -842,13 +867,19 @@ class _GlassCaptureContext extends PaintingContext {
     // emulation parameters (paint color, filters, shader identity).
     if (childLayer is OpacityLayer) {
       final alpha = childLayer.alpha ?? 255;
-      canvas.saveLayer(null, Paint()..color = Color.fromARGB(alpha, 0, 0, 0));
-      painter(this, offset);
+      final layerPaint = Paint()..color = Color.fromARGB(alpha, 0, 0, 0);
+      canvas.saveLayer(null, layerPaint);
+      _withLayerPaint(layerPaint, () {
+        painter(this, offset);
+      });
       canvas.restore();
     } else if (childLayer is ColorFilterLayer &&
         childLayer.colorFilter != null) {
-      canvas.saveLayer(null, Paint()..colorFilter = childLayer.colorFilter);
-      painter(this, offset);
+      final layerPaint = Paint()..colorFilter = childLayer.colorFilter;
+      canvas.saveLayer(null, layerPaint);
+      _withLayerPaint(layerPaint, () {
+        painter(this, offset);
+      });
       canvas.restore();
     } else if (childLayer is ImageFilterLayer &&
         childLayer.imageFilter != null) {
@@ -1052,8 +1083,11 @@ class _GlassCaptureContext extends PaintingContext {
   }) {
     _hasher.addInt(37);
     _hasher.addInt(alpha);
-    canvas.saveLayer(null, Paint()..color = Color.fromARGB(alpha, 0, 0, 0));
-    painter(this, offset);
+    final layerPaint = Paint()..color = Color.fromARGB(alpha, 0, 0, 0);
+    canvas.saveLayer(null, layerPaint);
+    _withLayerPaint(layerPaint, () {
+      painter(this, offset);
+    });
     canvas.restore();
     return OpacityLayer(alpha: alpha);
   }
@@ -1507,11 +1541,13 @@ class RenderGlassScope extends RenderProxyBox {
   static const Offset _unscaled = Offset(1, 1);
 
   /// Registers [c], drawn at [offsetLogical] (scope-logical) with the
-  /// axis-aligned [scale] between its local space and the scope.
+  /// axis-aligned [scale] between its local space and the scope, inside
+  /// saveLayers with [layerPaints] (outermost first).
   void _registerGlass(
     RenderLiquidGlassContainer c,
     Offset offsetLogical,
     Offset scale,
+    List<Paint> layerPaints,
   ) {
     final dpr = _devicePixelRatio;
     final glassPx =
@@ -1535,6 +1571,7 @@ class RenderGlassScope extends RenderProxyBox {
         paintBounds,
         sampleBounds,
         c._stateHash(glassPx, scale),
+        layerPaints,
       ),
     );
   }
@@ -1762,12 +1799,10 @@ class RenderGlassScope extends RenderProxyBox {
     _hashB = hasher.b;
     _hashValid = !hasher.poisoned;
 
-    // any glass geometry/param/child-content change schedules the stale-pane
-    // check (panes key their composite crops on these states themselves)
-    final states = [
-      for (final e in _entries)
-        Object.hash(e.stateHash, e.childHashA, e.childHashB, e.childSeq),
-    ];
+    // any glass geometry/param/child-content/layer-paint change schedules the
+    // stale-pane check (panes key their composite crops on these states
+    // themselves)
+    final states = [for (final e in _entries) e.compositeState];
     final epochChanged = !listEquals(states, _prevGlassStates);
     if (epochChanged) _prevGlassStates = states;
 
@@ -1798,19 +1833,37 @@ class RenderGlassScope extends RenderProxyBox {
       // only this pane's own geometry/params or its lower set can make its
       // painted output stale; unrelated panes must not cause repaints
       if (e.stateHash != c._lastPaintedOwnState ||
-          _lowerStatesHash(_lowerIntersecting(c)) != c._lastPaintedLowerHash) {
+          _lowerStatesHash(e, _lowerIntersecting(c)) !=
+              c._lastPaintedLowerHash) {
         c.markNeedsPaint();
       }
     }
   }
 
-  /// Combined state of the lower panes whose output a pane composites.
-  static int _lowerStatesHash(List<_GlassEntry> lower) => lower.isEmpty
+  /// Combined state of the lower panes whose output [upper] composites.
+  static int _lowerStatesHash(_GlassEntry? upper, List<_GlassEntry> lower) =>
+      lower.isEmpty
       ? 0
       : Object.hashAll([
           for (final e in lower)
-            Object.hash(e.stateHash, e.childHashA, e.childHashB, e.childSeq),
+            Object.hash(e.compositeState, _sharedLayers(upper, e)),
         ]);
+
+  /// How many of [lower]'s layer paints [upper] is drawn inside too: the
+  /// shared ancestors (the same objects, handed out by the same walk). The
+  /// scene applies those to the upper pane's output as a whole, so they are
+  /// not replayed on what it samples.
+  static int _sharedLayers(_GlassEntry? upper, _GlassEntry lower) {
+    final mine = upper?.layerPaints ?? const <Paint>[];
+    final theirs = lower.layerPaints;
+    var n = 0;
+    while (n < mine.length &&
+        n < theirs.length &&
+        identical(mine[n], theirs[n])) {
+      n++;
+    }
+    return n;
+  }
 
   @override
   void dispose() {
@@ -1851,7 +1904,10 @@ class _GlassEntry {
     this.paintBounds,
     this.sampleBounds,
     this.stateHash,
-  );
+    this.layerPaints,
+  ) : layerHash = Object.hashAll([
+        for (final p in layerPaints) Object.hash(p.color, p.colorFilter),
+      ]);
 
   final RenderLiquidGlassContainer container;
   final Rect glassPx;
@@ -1861,6 +1917,17 @@ class _GlassEntry {
   final Rect paintBounds;
   final Rect sampleBounds;
   final int stateHash;
+
+  /// Paints of the opacity and color-filter layers the scene draws this pane
+  /// and its child inside (outermost first); upper panes replay them around
+  /// the pane's output so a faded or filtered pane reads the same through
+  /// them.
+  final List<Paint> layerPaints;
+  final int layerHash;
+
+  /// Everything upper panes composite from this entry (beyond the backdrop).
+  int get compositeState =>
+      Object.hash(stateHash, childHashA, childHashB, childSeq, layerHash);
 
   /// This frame's recorded glass output (scope-logical coords), set by the
   /// container during its paint when a later pane needs to sample it.
@@ -2422,7 +2489,7 @@ class RenderLiquidGlassContainer extends RenderBox
         Size(size.width * scale.dx * dpr, size.height * scale.dy * dpr);
     final entry = scope._entryOf(this);
     final lower = scope._lowerIntersecting(this);
-    final lowerHash = RenderGlassScope._lowerStatesHash(lower);
+    final lowerHash = RenderGlassScope._lowerStatesHash(entry, lower);
     // Stamps for the post-frame stale-pane check, taken from the registry so
     // the later comparison uses the same source.
     _lastPaintedGen = scope.generation;
@@ -2721,12 +2788,25 @@ class RenderLiquidGlassContainer extends RenderBox
         ),
         Paint()..filterQuality = FilterQuality.low,
       );
+      final upper = scope._entryOf(this);
       for (final e in lower) {
+        // replay the layers the scene draws the lower pane and its child in,
+        // less those it draws this pane in too (a faded page under a dialog)
+        final saveCount = c.getSaveCount();
+        final layerPaints = e.layerPaints;
+        for (
+          var i = RenderGlassScope._sharedLayers(upper, e);
+          i < layerPaints.length;
+          i++
+        ) {
+          c.saveLayer(null, layerPaints[i]);
+        }
         final pic = e.picture;
         if (pic != null) c.drawPicture(pic);
         for (final cp in e.childPictures) {
           c.drawPicture(cp);
         }
+        c.restoreToCount(saveCount);
       }
       final pic = rec.endRecording();
       _sharp = pic.toImageSync(crop.width.toInt(), crop.height.toInt());

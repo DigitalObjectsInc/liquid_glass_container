@@ -1702,4 +1702,144 @@ void main() {
     expect(to - from, inInclusiveRange(13, 21));
     expect(tester.takeException(), isNull);
   });
+
+  /// A lower pane with an opaque red child inside [wrap], overlapped by an
+  /// upper pane on the right; both clear, over white.
+  Widget layeredLowerPane(Widget Function(Widget pane) wrap) => MaterialApp(
+    home: RepaintBoundary(
+      child: Scaffold(
+        body: GlassBackdropScope(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              const ColoredBox(color: Color(0xFFFFFFFF)),
+              Positioned(
+                left: 100,
+                top: 100,
+                child: wrap(
+                  LiquidGlassContainer(
+                    width: 200,
+                    height: 200,
+                    settings: _clearGlass,
+                    child: Container(color: const Color(0xFFFF0000)),
+                  ),
+                ),
+              ),
+              const Positioned(
+                left: 220,
+                top: 140,
+                child: LiquidGlassContainer(
+                  width: 200,
+                  height: 200,
+                  settings: _clearGlass,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
+  testWidgets('a lower pane under an Opacity reads faded through an upper '
+      'pane', (tester) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      layeredLowerPane((pane) {
+        return Opacity(opacity: 0.2, child: pane);
+      }),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // on screen, beside the upper pane: red at 0.2 over white
+    expect(snapshot.blue(150, 250), inInclusiveRange(190, 215));
+    // through the upper pane: the same faded red, not the opaque child
+    expect(snapshot.red(280, 250), greaterThan(240));
+    expect(snapshot.blue(280, 250), inInclusiveRange(190, 215));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a lower pane under a ColorFiltered reads filtered through an '
+      'upper pane', (tester) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      layeredLowerPane((pane) {
+        return ColorFiltered(
+          colorFilter: const ColorFilter.mode(
+            Color(0xFF0000FF),
+            BlendMode.srcIn,
+          ),
+          child: pane,
+        );
+      }),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // on screen, beside the upper pane: the red child filtered to blue
+    expect(snapshot.red(150, 250), lessThan(20));
+    expect(snapshot.blue(150, 250), greaterThan(235));
+    // through the upper pane: the same blue, not the unfiltered red
+    expect(snapshot.red(280, 250), lessThan(20));
+    expect(snapshot.blue(280, 250), greaterThan(235));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an Opacity around both panes fades the lower pane once', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  const ColoredBox(color: Color(0xFFFFFFFF)),
+                  Opacity(
+                    opacity: 0.2,
+                    child: Stack(
+                      children: [
+                        Positioned(
+                          left: 100,
+                          top: 100,
+                          child: LiquidGlassContainer(
+                            width: 200,
+                            height: 200,
+                            settings: _clearGlass,
+                            child: Container(color: const Color(0xFFFF0000)),
+                          ),
+                        ),
+                        const Positioned(
+                          left: 220,
+                          top: 140,
+                          child: LiquidGlassContainer(
+                            width: 200,
+                            height: 200,
+                            settings: _clearGlass,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // the shared Opacity fades the upper pane's output as a whole: what it
+    // samples of the lower pane is not faded again (0.04 red would read
+    // nearly white)
+    expect(snapshot.blue(150, 250), inInclusiveRange(190, 215));
+    expect(snapshot.blue(280, 250), inInclusiveRange(190, 215));
+    expect(tester.takeException(), isNull);
+  });
 }
