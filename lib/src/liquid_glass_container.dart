@@ -1578,7 +1578,6 @@ class RenderGlassScope extends RenderProxyBox {
 
   void _clearEntries() {
     for (final e in _entries) {
-      e.picture?.dispose();
       e.childLayer?.dispose(); // also disposes the pictures it owns
     }
     _entries.clear();
@@ -1830,6 +1829,13 @@ class RenderGlassScope extends RenderProxyBox {
       }
       final e = _entryOf(c);
       if (e == null) continue; // not registered this frame (culled)
+      // a sampled pane with no output at its geometry (its boundary was
+      // clean when an upper pane arrived, or moved it without a repaint)
+      // must repaint to record one
+      if (e.picture == null && _needsPicture(c)) {
+        c.markNeedsPaint();
+        continue;
+      }
       // only this pane's own geometry/params or its lower set can make its
       // painted output stale; unrelated panes must not cause repaints
       if (e.stateHash != c._lastPaintedOwnState ||
@@ -1926,12 +1932,20 @@ class _GlassEntry {
   final int layerHash;
 
   /// Everything upper panes composite from this entry (beyond the backdrop).
-  int get compositeState =>
-      Object.hash(stateHash, childHashA, childHashB, childSeq, layerHash);
+  int get compositeState => Object.hash(
+    stateHash,
+    childHashA,
+    childHashB,
+    childSeq,
+    layerHash,
+    picture == null ? 0 : container._outputKey,
+  );
 
-  /// This frame's recorded glass output (scope-logical coords), set by the
-  /// container during its paint when a later pane needs to sample it.
-  ui.Picture? picture;
+  /// The container's recorded glass output (scope-logical coords), kept by
+  /// the container across scope repaints; null until it records one at this
+  /// entry's geometry.
+  ui.Picture? get picture =>
+      container._outputState == stateHash ? container._output : null;
 
   /// The pane child's recorded output (scope-logical coords), captured by
   /// [RenderGlassScope._recordChildren] when a later pane samples this one.
@@ -2188,6 +2202,20 @@ class RenderLiquidGlassContainer extends RenderBox
   int _lastPaintedOwnState = 0;
   int _lastPaintedLowerHash = 0;
 
+  /// This pane's last recorded glass output (scope-logical coords), kept
+  /// while a later pane samples it. The pane owns it, not the scope's
+  /// registry: a pane inside a clean repaint boundary does not repaint with
+  /// the scope, and its output must outlive the registry rebuild.
+  ui.Picture? _output;
+
+  /// The own-state stamp [_output] was recorded with; the registry ignores
+  /// an output recorded at another geometry.
+  int _outputState = 0;
+
+  /// All the stamps [_output] was recorded with; upper panes key their
+  /// composite crops on it, so a re-recorded output recomposites them.
+  int _outputKey = 0;
+
   /// Crop texture rebuilds, for tests (debug builds only).
   @visibleForTesting
   static int debugCropTextureBuilds = 0;
@@ -2239,6 +2267,11 @@ class RenderLiquidGlassContainer extends RenderBox
     _blurred = null;
     _texCrop = null;
     _texGen = -1;
+  }
+
+  void _dropOutput() {
+    _output?.dispose();
+    _output = null;
   }
 
   // Container semantics: explicit dims win; else wrap child + padding; else
@@ -2572,8 +2605,16 @@ class RenderLiquidGlassContainer extends RenderBox
         shadowIntensity,
       );
       _paintGlass(recCanvas, drawOrigin, ps, shadowIntensity);
-      entry.picture?.dispose();
-      entry.picture = rec.endRecording();
+      _output?.dispose();
+      _output = rec.endRecording();
+      _outputState = _lastPaintedOwnState;
+      _outputKey = Object.hash(
+        _lastPaintedGen,
+        _lastPaintedOwnState,
+        _lastPaintedLowerHash,
+      );
+    } else {
+      _dropOutput();
     }
 
     _paintChild(context, offset);
@@ -2903,7 +2944,9 @@ class RenderLiquidGlassContainer extends RenderBox
     Offset offset,
     RenderGlassScope scope,
   ) {
-    _dropCropTextures(); // frees capture-pipeline leftovers; no-op afterwards
+    // frees capture-pipeline leftovers; no-op afterwards
+    _dropCropTextures();
+    _dropOutput();
     final glassPath = _glassPathFor(size); // also refreshes _pathR
     final shadowIntensity = _settings.shadowIntensity!;
 
@@ -2999,6 +3042,7 @@ class RenderLiquidGlassContainer extends RenderBox
   @override
   void dispose() {
     _dropCropTextures();
+    _dropOutput();
     _shader?.dispose();
     _shader = null;
     _compShader?.dispose();

@@ -1842,4 +1842,145 @@ void main() {
     expect(snapshot.blue(280, 250), inInclusiveRange(190, 215));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('a lower pane in a clean boundary stays in the upper pane '
+      'across scope repaints', (tester) async {
+    await _setUp(tester);
+    var color = const Color(0xFFFFFFFF);
+    late StateSetter setColor;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  StatefulBuilder(
+                    builder: (context, setState) {
+                      setColor = setState;
+                      return ColoredBox(color: color);
+                    },
+                  ),
+                  // strongly tinted, childless: only its glass output can
+                  // tint the upper pane
+                  const Positioned(
+                    left: 100,
+                    top: 100,
+                    child: RepaintBoundary(
+                      child: LiquidGlassContainer(
+                        width: 200,
+                        height: 200,
+                        settings: LiquidGlassSettings(
+                          thickness: 0,
+                          blurRadius: 0,
+                          tint: Color(0xCCFF0000),
+                          shadowIntensity: 0,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const Positioned(
+                    left: 220,
+                    top: 140,
+                    child: LiquidGlassContainer(
+                      width: 200,
+                      height: 200,
+                      settings: _clearGlass,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    var snapshot = await _snapshot(tester);
+    expect(snapshot.red(280, 250) - snapshot.blue(280, 250), greaterThan(150));
+
+    // the scope repaints and recaptures; the lower pane's boundary is clean
+    setColor(() => color = const Color(0xFFEEEEEE));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+    snapshot = await _snapshot(tester);
+    // through the upper pane: the lower pane's red body over the new grey
+    expect(snapshot.red(280, 250) - snapshot.blue(280, 250), greaterThan(150));
+    // the upper pane's interior past the lower pane shows the new grey
+    expect(snapshot.red(390, 250), inInclusiveRange(228, 248));
+    expect(snapshot.blue(390, 250), inInclusiveRange(228, 248));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an upper pane arriving over a pane in a clean boundary shows '
+      'it', (tester) async {
+    await _setUp(tester);
+    var showUpper = false;
+    late StateSetter setShowUpper;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: StatefulBuilder(
+                builder: (context, setState) {
+                  setShowUpper = setState;
+                  return Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      const ColoredBox(color: Color(0xFFFFFFFF)),
+                      // childless and strongly tinted, as above
+                      const Positioned(
+                        left: 100,
+                        top: 100,
+                        child: RepaintBoundary(
+                          child: LiquidGlassContainer(
+                            width: 200,
+                            height: 200,
+                            settings: LiquidGlassSettings(
+                              thickness: 0,
+                              blurRadius: 0,
+                              tint: Color(0xCCFF0000),
+                              shadowIntensity: 0,
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (showUpper)
+                        const Positioned(
+                          left: 220,
+                          top: 140,
+                          child: LiquidGlassContainer(
+                            width: 200,
+                            height: 200,
+                            settings: _clearGlass,
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    // nothing sampled the lower pane, so it recorded no output; the scope
+    // repaints for the new pane while the lower pane's boundary stays clean
+    setShowUpper(() => showUpper = true);
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+    final snapshot = await _snapshot(tester);
+    expect(snapshot.red(280, 250) - snapshot.blue(280, 250), greaterThan(150));
+    // converged: no repaint keeps scheduling frames
+    expect(tester.binding.hasScheduledFrame, isFalse);
+    expect(tester.takeException(), isNull);
+  });
 }
