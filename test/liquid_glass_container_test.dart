@@ -1643,4 +1643,344 @@ void main() {
     expect(snapshot.blue(250, 150), greaterThan(200));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('downscaled blur spreads an edge by sigma = blurRadius / 3', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CustomPaint(painter: _SplitPainter(300)),
+                  const Positioned(
+                    left: 150,
+                    top: 150,
+                    child: LiquidGlassContainer(
+                      width: 300,
+                      height: 300,
+                      // 40 device px at dpr 2: blurred at a quarter size
+                      settings: LiquidGlassSettings(
+                        thickness: 0,
+                        blurRadius: 20,
+                        tint: Color(0x00000000),
+                        shadowIntensity: 0,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // 10%..90% of the red-to-blue step across the split, in logical px; a
+    // gaussian edge spans 2.56 sigma, 17 px at sigma 20 / 3 (a blur applied
+    // at the quarter-size texel scale would span about 4)
+    int? crossing(double fraction) {
+      for (var x = 250; x < 350; x++) {
+        if (snapshot.blue(x, 300) >= 255 * fraction) {
+          return x;
+        }
+      }
+      return null;
+    }
+
+    final from = crossing(0.1);
+    final to = crossing(0.9);
+    if (from == null || to == null) {
+      fail('no red-to-blue step across the split');
+    }
+    expect(to - from, inInclusiveRange(13, 21));
+    expect(tester.takeException(), isNull);
+  });
+
+  /// A lower pane with an opaque red child inside [wrap], overlapped by an
+  /// upper pane on the right; both clear, over white.
+  Widget layeredLowerPane(Widget Function(Widget pane) wrap) => MaterialApp(
+    home: RepaintBoundary(
+      child: Scaffold(
+        body: GlassBackdropScope(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              const ColoredBox(color: Color(0xFFFFFFFF)),
+              Positioned(
+                left: 100,
+                top: 100,
+                child: wrap(
+                  LiquidGlassContainer(
+                    width: 200,
+                    height: 200,
+                    settings: _clearGlass,
+                    child: Container(color: const Color(0xFFFF0000)),
+                  ),
+                ),
+              ),
+              const Positioned(
+                left: 220,
+                top: 140,
+                child: LiquidGlassContainer(
+                  width: 200,
+                  height: 200,
+                  settings: _clearGlass,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
+  testWidgets('a lower pane under an Opacity reads faded through an upper '
+      'pane', (tester) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      layeredLowerPane((pane) {
+        return Opacity(opacity: 0.2, child: pane);
+      }),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // on screen, beside the upper pane: red at 0.2 over white
+    expect(snapshot.blue(150, 250), inInclusiveRange(190, 215));
+    // through the upper pane: the same faded red, not the opaque child
+    expect(snapshot.red(280, 250), greaterThan(240));
+    expect(snapshot.blue(280, 250), inInclusiveRange(190, 215));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a lower pane under a ColorFiltered reads filtered through an '
+      'upper pane', (tester) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      layeredLowerPane((pane) {
+        return ColorFiltered(
+          colorFilter: const ColorFilter.mode(
+            Color(0xFF0000FF),
+            BlendMode.srcIn,
+          ),
+          child: pane,
+        );
+      }),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // on screen, beside the upper pane: the red child filtered to blue
+    expect(snapshot.red(150, 250), lessThan(20));
+    expect(snapshot.blue(150, 250), greaterThan(235));
+    // through the upper pane: the same blue, not the unfiltered red
+    expect(snapshot.red(280, 250), lessThan(20));
+    expect(snapshot.blue(280, 250), greaterThan(235));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an Opacity around both panes fades the lower pane once', (
+    tester,
+  ) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  const ColoredBox(color: Color(0xFFFFFFFF)),
+                  Opacity(
+                    opacity: 0.2,
+                    child: Stack(
+                      children: [
+                        Positioned(
+                          left: 100,
+                          top: 100,
+                          child: LiquidGlassContainer(
+                            width: 200,
+                            height: 200,
+                            settings: _clearGlass,
+                            child: Container(color: const Color(0xFFFF0000)),
+                          ),
+                        ),
+                        const Positioned(
+                          left: 220,
+                          top: 140,
+                          child: LiquidGlassContainer(
+                            width: 200,
+                            height: 200,
+                            settings: _clearGlass,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    final snapshot = await _snapshot(tester);
+    // the shared Opacity fades the upper pane's output as a whole: what it
+    // samples of the lower pane is not faded again (0.04 red would read
+    // nearly white)
+    expect(snapshot.blue(150, 250), inInclusiveRange(190, 215));
+    expect(snapshot.blue(280, 250), inInclusiveRange(190, 215));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a lower pane in a clean boundary stays in the upper pane '
+      'across scope repaints', (tester) async {
+    await _setUp(tester);
+    var color = const Color(0xFFFFFFFF);
+    late StateSetter setColor;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  StatefulBuilder(
+                    builder: (context, setState) {
+                      setColor = setState;
+                      return ColoredBox(color: color);
+                    },
+                  ),
+                  // strongly tinted, childless: only its glass output can
+                  // tint the upper pane
+                  const Positioned(
+                    left: 100,
+                    top: 100,
+                    child: RepaintBoundary(
+                      child: LiquidGlassContainer(
+                        width: 200,
+                        height: 200,
+                        settings: LiquidGlassSettings(
+                          thickness: 0,
+                          blurRadius: 0,
+                          tint: Color(0xCCFF0000),
+                          shadowIntensity: 0,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const Positioned(
+                    left: 220,
+                    top: 140,
+                    child: LiquidGlassContainer(
+                      width: 200,
+                      height: 200,
+                      settings: _clearGlass,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    var snapshot = await _snapshot(tester);
+    expect(snapshot.red(280, 250) - snapshot.blue(280, 250), greaterThan(150));
+
+    // the scope repaints and recaptures; the lower pane's boundary is clean
+    setColor(() => color = const Color(0xFFEEEEEE));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+    snapshot = await _snapshot(tester);
+    // through the upper pane: the lower pane's red body over the new grey
+    expect(snapshot.red(280, 250) - snapshot.blue(280, 250), greaterThan(150));
+    // the upper pane's interior past the lower pane shows the new grey
+    expect(snapshot.red(390, 250), inInclusiveRange(228, 248));
+    expect(snapshot.blue(390, 250), inInclusiveRange(228, 248));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an upper pane arriving over a pane in a clean boundary shows '
+      'it', (tester) async {
+    await _setUp(tester);
+    var showUpper = false;
+    late StateSetter setShowUpper;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: RepaintBoundary(
+          child: Scaffold(
+            body: GlassBackdropScope(
+              child: StatefulBuilder(
+                builder: (context, setState) {
+                  setShowUpper = setState;
+                  return Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      const ColoredBox(color: Color(0xFFFFFFFF)),
+                      // childless and strongly tinted, as above
+                      const Positioned(
+                        left: 100,
+                        top: 100,
+                        child: RepaintBoundary(
+                          child: LiquidGlassContainer(
+                            width: 200,
+                            height: 200,
+                            settings: LiquidGlassSettings(
+                              thickness: 0,
+                              blurRadius: 0,
+                              tint: Color(0xCCFF0000),
+                              shadowIntensity: 0,
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (showUpper)
+                        const Positioned(
+                          left: 220,
+                          top: 140,
+                          child: LiquidGlassContainer(
+                            width: 200,
+                            height: 200,
+                            settings: _clearGlass,
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    // nothing sampled the lower pane, so it recorded no output; the scope
+    // repaints for the new pane while the lower pane's boundary stays clean
+    setShowUpper(() => showUpper = true);
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+    final snapshot = await _snapshot(tester);
+    expect(snapshot.red(280, 250) - snapshot.blue(280, 250), greaterThan(150));
+    // converged: no repaint keeps scheduling frames
+    expect(tester.binding.hasScheduledFrame, isFalse);
+    expect(tester.takeException(), isNull);
+  });
 }
