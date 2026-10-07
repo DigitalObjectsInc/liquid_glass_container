@@ -1295,6 +1295,7 @@ class RenderGlassScope extends RenderProxyBox {
       _dropTextures();
       _captureLayer?.dispose();
       _captureLayer = null;
+      _capturePictures = const [];
       _hashValid = false;
       _boundaries.clear();
       _boundarySigs.clear();
@@ -1330,6 +1331,33 @@ class RenderGlassScope extends RenderProxyBox {
   bool _hashValid = false;
 
   bool get hasBackdrop => _captureLayer != null;
+
+  /// The backdrop recording's pictures, in paint order (scope-logical
+  /// coordinates), collected with [_flatTextures] only. The capture inlines
+  /// every layer, so [_captureLayer] is a flat list of picture layers; it
+  /// owns these.
+  List<ui.Picture> _capturePictures = const [];
+
+  /// Whether textures are recorded straight from the backdrop's pictures
+  /// instead of from other textures.
+  ///
+  /// Skwasm (Flutter 3.47) rasterizes a `toImageSync` image the first time
+  /// it is drawn, and an image drawn inside another image's picture
+  /// recursively, from inside that one. Chained textures (the blur from the
+  /// sharp texture via a downscaled copy, a composite from the backdrop
+  /// texture, an upper pane's composite from a lower pane's output) nest
+  /// about three rasterizations per stacked pane: 13 with four panes over a
+  /// changing backdrop. Skwasm renders on a 64 KB stack with no guard, the
+  /// render worker's when multi-threaded and the main thread's when
+  /// single-threaded (no cross-origin isolation), and that depth overflows
+  /// it: the overflow silently overwrites the memory below the stack (the
+  /// worker's thread-locals, or the main thread's static data) and a later
+  /// call traps ("table index is out of bounds", "memory access out of
+  /// bounds", "Aborted()") or hangs. Recording every texture from pictures
+  /// keeps each one a single deferred image: one level per stacked pane.
+  /// JavaScript (CanvasKit) builds rasterize `toImageSync` eagerly and keep
+  /// the chained textures.
+  static const bool _flatTextures = kIsWasm;
 
   // Full-scope backdrop textures, shared by every container: position
   // independent (glass movement never invalidates them) and one set of GPU
@@ -1637,25 +1665,50 @@ class RenderGlassScope extends RenderProxyBox {
     pixelRatio: _devicePixelRatio,
   );
 
-  /// Full-scope raster of the backdrop recording (device px).
+  /// Drops the full-scope textures once the backdrop generation or the DPR
+  /// they were rasterized for has changed, and re-keys the cache.
+  void _dropStaleTextures() {
+    if (_texGen == _generation && _texDpr == _devicePixelRatio) {
+      return;
+    }
+    _dropTextures();
+    _texGen = _generation;
+    _texDpr = _devicePixelRatio;
+  }
+
+  /// Full-scope raster of the backdrop recording (device px), built on
+  /// first use per backdrop. With [_flatTextures] only panes that show the
+  /// sharp backdrop ask for it (see [RenderLiquidGlassContainer.paint]).
   ui.Image _sharpTexture() {
-    if (_texGen != _generation || _texDpr != _devicePixelRatio) {
-      _dropTextures();
-      _sharpTex = _captureLayer!.toImageSync(
+    _dropStaleTextures();
+    final cached = _sharpTex;
+    if (cached != null) {
+      return cached;
+    }
+    final ui.Image texture;
+    if (_flatTextures) {
+      texture = _recordRegion(_scopeDeviceRect());
+    } else {
+      final captureLayer = _captureLayer;
+      if (captureLayer == null) {
+        throw StateError('No backdrop recording to rasterize.');
+      }
+      texture = captureLayer.toImageSync(
         Offset.zero & size,
         pixelRatio: _devicePixelRatio,
       );
-      _texGen = _generation;
-      _texDpr = _devicePixelRatio;
     }
-    return _sharpTex!;
+    _sharpTex = texture;
+    return texture;
   }
 
   /// Blurred counterpart per distinct blur radius, via Skia's gaussian
   /// (sigma = radius/3 like the reference), rendered downscaled — blur is
   /// low-frequency, and fewer pixels mean a cheaper readback on CanvasKit.
   /// At radius <= 2 the blur is sub-pixel: the sharp texture is aliased
-  /// instead of building (and reading back) a near-identical copy.
+  /// instead of building (and reading back) a near-identical copy. Above
+  /// that it is blurred from the sharp texture, or with [_flatTextures]
+  /// recorded from the backdrop's pictures, without the sharp texture.
   ///
   /// LRU-capped: an animated blur radius over a static backdrop would
   /// otherwise accumulate one texture per distinct radius until the next
@@ -1663,14 +1716,21 @@ class RenderGlassScope extends RenderProxyBox {
   /// by the container count); evicted images stay alive while recorded
   /// pictures still reference them (dart:ui images are refcounted).
   ui.Image _blurredTexture(int radius) {
-    final sharp = _sharpTexture(); // refreshes cache key, drops stale blurs
-    if (radius <= 2) return sharp;
+    if (radius <= 2) {
+      return _sharpTexture();
+    }
+    _dropStaleTextures();
     final cached = _blurTexs.remove(radius);
     if (cached != null) {
       _blurTexs[radius] = cached; // reinsert: most recently used last
       return cached;
     }
-    final img = _blur(sharp, radius);
+    final ui.Image img;
+    if (_flatTextures) {
+      img = _recordRegion(_scopeDeviceRect(), blurRadius: radius);
+    } else {
+      img = _blur(_sharpTexture(), radius);
+    }
     _blurTexs[radius] = img;
     final cap = math.max(8, _containers.length);
     while (_blurTexs.length > cap) {
@@ -1679,17 +1739,107 @@ class RenderGlassScope extends RenderProxyBox {
     return img;
   }
 
+  /// The whole scope in device px: what the full-scope textures cover and
+  /// what panes address the backdrop in.
+  Rect _scopeDeviceRect() {
+    return Rect.fromLTWH(
+      0,
+      0,
+      (size.width * _devicePixelRatio).ceilToDouble(),
+      (size.height * _devicePixelRatio).ceilToDouble(),
+    );
+  }
+
+  /// Rasterizes [devicePxRect] (scope device px) of the backdrop, drawn from
+  /// its pictures rather than from a texture of it ([_flatTextures]): one
+  /// deferred image, however it is built. The [lower] panes' output is drawn
+  /// over the backdrop as [upper] samples it ([_drawLower]). With
+  /// [blurRadius] > 2 the result is blurred like [_blur]: the region is
+  /// stretched onto the downscaled raster, blurred at [_blurSigma] in that
+  /// raster's px, as one layer over the same content.
+  ui.Image _recordRegion(
+    Rect devicePxRect, {
+    int blurRadius = 0,
+    _GlassEntry? upper,
+    List<_GlassEntry> lower = const [],
+  }) {
+    final dpr = _devicePixelRatio;
+    final isBlurred = blurRadius > 2;
+    final downscale = isBlurred ? _blurDownscale(blurRadius) : 1.0;
+    final width = math.max(1, (devicePxRect.width / downscale).ceil());
+    final height = math.max(1, (devicePxRect.height / downscale).ceil());
+    final logicalRect = Rect.fromLTRB(
+      devicePxRect.left / dpr,
+      devicePxRect.top / dpr,
+      devicePxRect.right / dpr,
+      devicePxRect.bottom / dpr,
+    );
+    // the region fills the raster exactly, as [_blur] stretches its source:
+    // dpr / downscale per axis, corrected for the rounding of the raster's
+    // size (exactly dpr without blur: the region is whole device px)
+    final scaleX = dpr / downscale * (width * downscale / devicePxRect.width);
+    final scaleY = dpr / downscale * (height * downscale / devicePxRect.height);
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.scale(scaleX, scaleY);
+    canvas.translate(-logicalRect.left, -logicalRect.top);
+    canvas.clipRect(logicalRect);
+    if (isBlurred) {
+      // [_blurSigma] is in px of the downscaled raster; the layer's filter
+      // is in logical px, which this canvas scales by scaleX and scaleY.
+      final sigma = _blurSigma(blurRadius);
+      canvas.saveLayer(
+        logicalRect,
+        Paint()
+          ..imageFilter = ui.ImageFilter.blur(
+            sigmaX: sigma / scaleX,
+            sigmaY: sigma / scaleY,
+            tileMode: TileMode.clamp,
+          ),
+      );
+    }
+    for (final picture in _capturePictures) {
+      canvas.drawPicture(picture);
+    }
+    _drawLower(canvas, upper, lower);
+    if (isBlurred) {
+      canvas.restore();
+    }
+    final recording = recorder.endRecording();
+    final image = recording.toImageSync(width, height);
+    recording.dispose();
+    return image;
+  }
+
   /// Number of cached blurred full-scope textures (see [_blurredTexture]).
   @visibleForTesting
   int get debugBlurTextureCount => _blurTexs.length;
+
+  /// Downscale of the raster a blur of [radius] device px runs on: blur is
+  /// low-frequency, so fewer pixels lose nothing visible.
+  static double _blurDownscale(int radius) {
+    if (radius >= 12) {
+      return 4.0;
+    }
+    if (radius >= 4) {
+      return 2.0;
+    }
+    return 1.0;
+  }
+
+  /// Gaussian sigma of a blur of [radius] device px (radius / 3, like the
+  /// reference), in px of the raster downscaled by [_blurDownscale].
+  static double _blurSigma(int radius) {
+    return math.max(radius / 3.0 / _blurDownscale(radius), 0.1);
+  }
 
   /// Downscales first, then blurs the small image drawn 1:1. One scaled
   /// drawImageRect with the blur on its paint is not portable: Skia blurs in
   /// destination space, Impeller in the source's texel space (the image stays
   /// full-res under a 1/ds transform), so its sigma lands ds times too small.
   static ui.Image _blur(ui.Image src, int radius) {
-    final ds = radius >= 12 ? 4.0 : (radius >= 4 ? 2.0 : 1.0);
-    final sigma = math.max(radius / 3.0 / ds, 0.1);
+    final ds = _blurDownscale(radius);
+    final sigma = _blurSigma(radius);
     final w = (src.width / ds).ceil();
     final h = (src.height / ds).ceil();
     final small = ds == 1 ? src : _drawImage(src, w, h, Paint());
@@ -1787,6 +1937,9 @@ class RenderGlassScope extends RenderProxyBox {
     } else {
       _captureLayer?.dispose();
       _captureLayer = captureLayer;
+      if (_flatTextures) {
+        _capturePictures = _collectPictures(captureLayer);
+      }
       _generation++;
       _stableStreak = 0;
       if (!_churning) {
@@ -1871,12 +2024,42 @@ class RenderGlassScope extends RenderProxyBox {
     return n;
   }
 
+  /// Draws the [lower] panes' recorded output and children (scope-logical
+  /// coordinates) inside the layers the scene draws each in, less those it
+  /// draws [upper] in too (a faded page under a dialog).
+  static void _drawLower(
+    Canvas canvas,
+    _GlassEntry? upper,
+    List<_GlassEntry> lower,
+  ) {
+    for (final entry in lower) {
+      final saveCount = canvas.getSaveCount();
+      final layerPaints = entry.layerPaints;
+      for (
+        var index = _sharedLayers(upper, entry);
+        index < layerPaints.length;
+        index++
+      ) {
+        canvas.saveLayer(null, layerPaints[index]);
+      }
+      final picture = entry.picture;
+      if (picture != null) {
+        canvas.drawPicture(picture);
+      }
+      for (final childPicture in entry.childPictures) {
+        canvas.drawPicture(childPicture);
+      }
+      canvas.restoreToCount(saveCount);
+    }
+  }
+
   @override
   void dispose() {
     _clearEntries();
     _dropTextures();
     _captureLayer?.dispose();
     _captureLayer = null;
+    _capturePictures = const [];
     _boundaries.clear();
     _boundarySigs.clear();
     _followers.clear();
@@ -2184,7 +2367,8 @@ class RenderLiquidGlassContainer extends RenderBox
   final Paint _glassPaint = Paint();
 
   // Churn-mode texture cache (see RenderGlassScope.isChurning): this
-  // container's crop of the backdrop, sharp + blurred.
+  // container's crop of the backdrop, sharp + blurred (no sharp one while
+  // [paint] skips it).
   ui.Image? _sharp;
   ui.Image? _blurred;
   Rect? _texCrop;
@@ -2505,12 +2689,7 @@ class RenderLiquidGlassContainer extends RenderBox
     if (scope._capturing || !scope.hasBackdrop) return;
 
     final dpr = scope.devicePixelRatio;
-    final scopePx = Rect.fromLTWH(
-      0,
-      0,
-      (scope.size.width * dpr).ceilToDouble(),
-      (scope.size.height * dpr).ceilToDouble(),
-    );
+    final scopePx = scope._scopeDeviceRect();
 
     // Container origin in scope device px, and the axis-aligned scale between
     // container and scope (rotation and skew are unsupported).
@@ -2539,28 +2718,52 @@ class RenderLiquidGlassContainer extends RenderBox
         .intersect(scopePx);
     // texture cache and shader blur operate in integer device px
     final devBlur = (_settings.blurRadius! * dpr * reachScale).round();
+    // With blurEdge the shader mixes the sharp texture in at zero weight
+    // (glass_main.frag, getTextureDispersion) and reads it raw only in the
+    // clip's AA fringe, 0.005 of the scope height or more outside the
+    // shape; up to 2 device px the blurred texture is the sharp one. Flat
+    // textures record the blur without the sharp texture, so there it is
+    // not built and the blurred one is bound in its place.
+    final skipSharp =
+        RenderGlassScope._flatTextures &&
+        _settings.blurEdge == true &&
+        devBlur > 2;
 
-    final ui.Image sharp;
-    final ui.Image blurred;
-    final Rect texRect; // u_cropOrigin/u_cropSize
+    final ({ui.Image sharp, ui.Image blurred, Rect rect}) textures;
     if (lower.isNotEmpty || scope.isChurning) {
       // Crop textures: when overlapped from below, the crop composites the
       // lower panes' recorded output over the backdrop (so this pane refracts
       // them); on an animated backdrop a crop is also far less readback data
       // per frame than the full scope.
-      _ensureCropTextures(scope, needed, scopePx, lower, lowerHash, devBlur);
-      sharp = _sharp!;
-      blurred = _blurred!;
-      texRect = _texCrop!;
+      textures = _ensureCropTextures(
+        scope,
+        needed,
+        scopePx,
+        lower,
+        lowerHash,
+        devBlur,
+        skipSharp,
+      );
     } else {
       // Static backdrop, nothing underneath: shared full-scope textures,
       // position independent (sampling clamps at the scope edge, exactly
-      // like the reference).
+      // like the reference). The scope builds its sharp texture only for
+      // panes that show it.
       _dropCropTextures();
-      sharp = scope._sharpTexture();
-      blurred = scope._blurredTexture(devBlur);
-      texRect = scopePx;
+      final blurred = scope._blurredTexture(devBlur);
+      final sharp = skipSharp ? blurred : scope._sharpTexture();
+      textures = (sharp: sharp, blurred: blurred, rect: scopePx);
     }
+    // u_cropSize is the sharp texture's extent: toImageSync ceils
+    // logical * dpr, so at a fractional DPR it can be one texel larger
+    // than the rect. A skipped one would have been recorded at the rect's
+    // own whole-pixel size.
+    final cropSize = skipSharp
+        ? textures.rect.size
+        : Size(
+            textures.sharp.width.toDouble(),
+            textures.sharp.height.toDouble(),
+          );
 
     _glassPathFor(size); // refreshes _pathR before the uniforms read it
     final shadowIntensity = _settings.shadowIntensity!;
@@ -2571,9 +2774,10 @@ class RenderLiquidGlassContainer extends RenderBox
       offset,
       originScope,
       scale,
-      texRect,
-      sharp,
-      blurred,
+      textures.rect,
+      cropSize,
+      textures.sharp,
+      textures.blurred,
       shadowIntensity,
     );
     _paintGlass(context.canvas, offset, _shader!, shadowIntensity);
@@ -2599,9 +2803,10 @@ class RenderLiquidGlassContainer extends RenderBox
         drawOrigin,
         originScope,
         scale,
-        texRect,
-        sharp,
-        blurred,
+        textures.rect,
+        cropSize,
+        textures.sharp,
+        textures.blurred,
         shadowIntensity,
       );
       _paintGlass(recCanvas, drawOrigin, ps, shadowIntensity);
@@ -2703,6 +2908,7 @@ class RenderLiquidGlassContainer extends RenderBox
     Offset originScope,
     Offset scale,
     Rect texRect,
+    Size cropSize,
     ui.Image sharp,
     ui.Image blurred,
     double shadowIntensity,
@@ -2746,19 +2952,18 @@ class RenderLiquidGlassContainer extends RenderBox
     s.setFloat(i++, cfg.shadowOffset!.dy);
     s.setFloat(i++, texRect.left); // u_cropOrigin
     s.setFloat(i++, texRect.top);
-    // u_cropSize comes from the actual texture: toImageSync ceils
-    // logical * dpr, so a fractional DPR can make the image one texel larger
-    // than the requested rect, and the uv mapping must use the real extent.
-    s.setFloat(i++, sharp.width.toDouble()); // u_cropSize
-    s.setFloat(i++, sharp.height.toDouble());
+    s.setFloat(i++, cropSize.width); // u_cropSize
+    s.setFloat(i++, cropSize.height);
     s.setImageSampler(0, blurred, filterQuality: FilterQuality.low);
     s.setImageSampler(1, sharp, filterQuality: FilterQuality.low);
   }
 
-  /// Rebuilds the crop textures if the cached ones don't cover [needed] for
-  /// the current generation (and, when compositing lower panes, the current
-  /// glass epoch).
-  void _ensureCropTextures(
+  /// The crop textures to paint with: the cached ones while they cover
+  /// [needed] for the current generation (and, when compositing lower panes,
+  /// the lower panes' current states), else rebuilt. With [skipSharp] (see
+  /// [paint]) no sharp texture is built or required, and the blurred one is
+  /// returned in its place.
+  ({ui.Image sharp, ui.Image blurred, Rect rect}) _ensureCropTextures(
     RenderGlassScope scope,
     Rect needed,
     Rect scopePx,
@@ -2768,20 +2973,26 @@ class RenderLiquidGlassContainer extends RenderBox
     // content (backdrop plus lower output) did not change.
     int lowerHash,
     int radius, // blur radius, device px
+    bool skipSharp,
   ) {
     final dpr = scope.devicePixelRatio;
     final kind = lower.isEmpty ? 0 : 1;
-    if (_texGen == scope.generation &&
+    final cachedRect = _texCrop;
+    final cachedBlurred = _blurred;
+    final cachedSharp = skipSharp ? _blurred : _sharp;
+    if (cachedRect != null &&
+        cachedBlurred != null &&
+        cachedSharp != null &&
+        _texGen == scope.generation &&
         _texDpr == dpr &&
         _texRadius == radius &&
         _texKind == kind &&
         _texLowerHash == lowerHash &&
-        _texCrop != null &&
-        _texCrop!.left <= needed.left &&
-        _texCrop!.top <= needed.top &&
-        _texCrop!.right >= needed.right &&
-        _texCrop!.bottom >= needed.bottom) {
-      return;
+        cachedRect.left <= needed.left &&
+        cachedRect.top <= needed.top &&
+        cachedRect.right >= needed.right &&
+        cachedRect.bottom >= needed.bottom) {
+      return (sharp: cachedSharp, blurred: cachedBlurred, rect: cachedRect);
     }
     assert(() {
       debugCropTextureBuilds++;
@@ -2798,8 +3009,36 @@ class RenderLiquidGlassContainer extends RenderBox
       (needed.bottom / _cropGrid).ceilToDouble() * _cropGrid,
     ).intersect(scopePx);
 
-    if (lower.isEmpty) {
-      _sharp = scope._captureRegion(crop);
+    final upper = scope._entryOf(this);
+    final ui.Image? sharp;
+    final ui.Image blurred;
+    if (RenderGlassScope._flatTextures) {
+      if (skipSharp) {
+        sharp = null;
+        blurred = scope._recordRegion(
+          crop,
+          blurRadius: radius,
+          upper: upper,
+          lower: lower,
+        );
+      } else {
+        final recorded = scope._recordRegion(crop, upper: upper, lower: lower);
+        sharp = recorded;
+        blurred = radius <= 2
+            ? recorded
+            : scope._recordRegion(
+                crop,
+                blurRadius: radius,
+                upper: upper,
+                lower: lower,
+              );
+      }
+    } else if (lower.isEmpty) {
+      final captured = scope._captureRegion(crop);
+      sharp = captured;
+      blurred = radius <= 2
+          ? captured
+          : RenderGlassScope._blur(captured, radius);
     } else {
       // Composite the lower panes' recorded output over the backdrop, in
       // scope-logical coordinates rasterized at device resolution.
@@ -2829,38 +3068,28 @@ class RenderLiquidGlassContainer extends RenderBox
         ),
         Paint()..filterQuality = FilterQuality.low,
       );
-      final upper = scope._entryOf(this);
-      for (final e in lower) {
-        // replay the layers the scene draws the lower pane and its child in,
-        // less those it draws this pane in too (a faded page under a dialog)
-        final saveCount = c.getSaveCount();
-        final layerPaints = e.layerPaints;
-        for (
-          var i = RenderGlassScope._sharedLayers(upper, e);
-          i < layerPaints.length;
-          i++
-        ) {
-          c.saveLayer(null, layerPaints[i]);
-        }
-        final pic = e.picture;
-        if (pic != null) c.drawPicture(pic);
-        for (final cp in e.childPictures) {
-          c.drawPicture(cp);
-        }
-        c.restoreToCount(saveCount);
-      }
+      RenderGlassScope._drawLower(c, upper, lower);
       final pic = rec.endRecording();
-      _sharp = pic.toImageSync(crop.width.toInt(), crop.height.toInt());
+      final composite = pic.toImageSync(
+        crop.width.toInt(),
+        crop.height.toInt(),
+      );
       pic.dispose();
       if (ownsBase) base.dispose();
+      sharp = composite;
+      blurred = radius <= 2
+          ? composite
+          : RenderGlassScope._blur(composite, radius);
     }
-    _blurred = radius <= 2 ? _sharp : RenderGlassScope._blur(_sharp!, radius);
+    _sharp = sharp;
+    _blurred = blurred;
     _texCrop = crop;
     _texGen = scope.generation;
     _texRadius = radius;
     _texDpr = dpr;
     _texKind = kind;
     _texLowerHash = lowerHash;
+    return (sharp: sharp ?? blurred, blurred: blurred, rect: crop);
   }
 
   // ---- CanvasKit fallback: BackdropFilter pipeline, no capture/readbacks ----
@@ -3007,9 +3236,10 @@ class RenderLiquidGlassContainer extends RenderBox
   ) {
     final cfg = _settings;
     final dpr = scope.devicePixelRatio;
+    final scopePx = scope._scopeDeviceRect();
     var i = 0;
-    s.setFloat(i++, (scope.size.width * dpr).ceilToDouble()); // u_scopeRes
-    s.setFloat(i++, (scope.size.height * dpr).ceilToDouble());
+    s.setFloat(i++, scopePx.width); // u_scopeRes
+    s.setFloat(i++, scopePx.height);
     s.setFloat(i++, dpr); // u_dpr
     s.setFloat(i++, drawOrigin.dx); // u_drawOrigin
     s.setFloat(i++, drawOrigin.dy);

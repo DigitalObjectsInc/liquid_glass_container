@@ -1983,4 +1983,112 @@ void main() {
     expect(tester.binding.hasScheduledFrame, isFalse);
     expect(tester.takeException(), isNull);
   });
+
+  /// A pane with refraction and a 20 px blur (40 device px at dpr 2, sigma
+  /// 6.7 px) and nothing else: no dispersion, fresnel, glare, tint or
+  /// shadow. A rect outline keeps the normal along the top edge vertical, so
+  /// the rim samples the backdrop column it sits over.
+  LiquidGlassContainer blurEdgePane({required bool blurEdge}) {
+    return LiquidGlassContainer(
+      width: 200,
+      height: 200,
+      settings: LiquidGlassSettings(
+        shape: const GlassShape.rect(),
+        dispersion: 0,
+        fresnelIntensity: 0,
+        glareIntensity: 0,
+        blurRadius: 20,
+        blurEdge: blurEdge,
+        tint: const Color(0x00000000),
+        shadowIntensity: 0,
+      ),
+    );
+  }
+
+  /// Over a red | blue split at x = 300: [sharpPane] (the blurEdge-off pane,
+  /// top 40) and a blurEdge pane at left 200, top 320. Both straddle the
+  /// split, and they sit too far apart for either to sample the other.
+  Widget blurEdgeScene(Widget sharpPane) {
+    return MaterialApp(
+      home: RepaintBoundary(
+        child: Scaffold(
+          body: GlassBackdropScope(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: _SplitPainter(300)),
+                sharpPane,
+                Positioned(
+                  left: 200,
+                  top: 320,
+                  child: blurEdgePane(blurEdge: true),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The rims at x = 302, 2.5 px right of the split (pixel centres) and
+  /// 2.5 px inside each pane's top edge, where the backdrop is pure blue and
+  /// blurred about 35% red (a gaussian edge at sigma 6.7 px).
+  void expectBlurEdgeRims(_Snapshot snapshot) {
+    // blurEdge off: the rim mixes the blur in by depth (0.125 here), so
+    // it shows the sharp backdrop
+    expect(snapshot.red(302, 42), lessThan(40));
+    expect(snapshot.blue(302, 42), greaterThan(215));
+    // blurEdge on: the rim shows the blurred backdrop, sampled where it sits
+    expect(snapshot.red(302, 322), inInclusiveRange(60, 140));
+  }
+
+  testWidgets('blurEdge picks the sharp or the blurred backdrop for the '
+      'refraction rim on crop textures', (tester) async {
+    await _setUp(tester);
+    await tester.pumpWidget(
+      blurEdgeScene(
+        Positioned(left: 200, top: 40, child: blurEdgePane(blurEdge: false)),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    // the first capture churns: each pane rasterizes its own crop
+    expect(_scope(tester).isChurning, isTrue);
+    expectBlurEdgeRims(await _snapshot(tester));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('blurEdge picks the sharp or the blurred backdrop for the '
+      'refraction rim on the shared full-scope textures', (tester) async {
+    await _setUp(tester);
+    var sharpLeft = 200.0;
+    late StateSetter setSharpLeft;
+    await tester.pumpWidget(
+      blurEdgeScene(
+        StatefulBuilder(
+          builder: (context, setState) {
+            setSharpLeft = setState;
+            return Positioned(
+              left: sharpLeft,
+              top: 40,
+              child: blurEdgePane(blurEdge: false),
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+    // stable repaints (the sharp pane nudged and back) settle the scope
+    // onto the shared full-scope textures
+    for (var frame = 0; frame < 40; frame++) {
+      setSharpLeft(() {
+        sharpLeft = frame.isEven ? 201 : 200;
+      });
+      await tester.pump();
+    }
+    expect(_scope(tester).isChurning, isFalse);
+    expectBlurEdgeRims(await _snapshot(tester));
+    expect(tester.takeException(), isNull);
+  });
 }
