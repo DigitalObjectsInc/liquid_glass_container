@@ -1,3 +1,30 @@
+# 0.1.4
+
+- `--wasm` (skwasm) web builds no longer crash with glass stacked over
+  glass on a changing backdrop. Skwasm rasterizes a `toImageSync` image the
+  first time it is drawn, and each pane built its blur and its composite
+  from other such images, so one frame nested about three rasterizations
+  per stacked pane and overflowed skwasm's 64 KB stack, multi- or
+  single-threaded. The overflow silently corrupted memory until a later
+  call failed ("table index is out of bounds", "memory access out of
+  bounds", "Aborted()") or hung. On skwasm every texture is now recorded
+  straight from the backdrop's pictures: one level per pane.
+- On skwasm, a pane with `blurEdge` on and a blur above 2 device px no
+  longer builds a sharp backdrop texture, and the scope's shared sharp
+  texture is built only for panes that show it. On a scope under about
+  200 device px tall, the anti-aliased edge of such a pane now shows the
+  blurred backdrop instead of the sharp one.
+- On Impeller, a pane's backdrop blur of 4 device px or more was 2-4x too
+  weak (lower panes read crisp, text under a rim smeared into stripes); it
+  now matches Skia.
+- Glass stacked over glass: a lower pane under `Opacity` or
+  `ColorFiltered` reads faded or filtered through an upper pane, as it
+  does on screen; a lower pane inside a clean repaint boundary stays in an
+  upper pane's composite across scope repaints; and an upper pane arriving
+  over a pane in a clean repaint boundary now shows it.
+- The shader no longer flips the backdrop textures vertically on Impeller's
+  OpenGL ES backend.
+
 # 0.1.3
 
 - Panes under a scale transform (`Transform.scale`, `FittedBox`, or a scale
